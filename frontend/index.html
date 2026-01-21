@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UltraChat - Local AI Chat</title>
+    <meta name="description" content="Full-featured local LLM chat interface powered by Ollama">
+    
+    <!-- Favicon -->
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+    
+    <!-- Fonts - Montserrat as per DESIGN_SYSTEM.md -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;500;600;700;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    
+    <!-- Styles -->
+    <link rel="stylesheet" href="/css/main.css">
+    <link rel="stylesheet" href="/css/components.css">
+    <link rel="stylesheet" href="/css/animations.css">
+    
+    <!-- Marked.js for Markdown -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- Highlight.js for code syntax -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head>
+<body>
+    <div id="app">
+        <!-- Sidebar -->
+        <aside id="sidebar" class="sidebar">
+            <div class="sidebar-header">
+                <h1 class="logo">
+                    <span class="logo-icon">⚡</span>
+                    <span class="logo-text">UltraChat</span>
+                </h1>
+            </div>
+            
+            <div class="sidebar-actions">
+                <button id="new-chat-btn" class="btn btn-primary btn-sm btn-full">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                        <path d="M12 5v14M5 12h14"/>
+                    </svg>
+                    New Chat
+                </button>
+            </div>
+            
+            <div class="sidebar-search">
+                <input type="text" id="search-conversations" placeholder="Search..." class="input-search">
+            </div>
+            </div>
+            
+            <nav class="sidebar-nav">
+                <div class="nav-section">
+                    <div class="nav-section-header">Recent</div>
+                    <div id="conversations-list" class="conversations-list">
+                        <!-- Conversations loaded dynamically -->
+                    </div>
+                </div>
+            </nav>
+            
+            <div class="sidebar-footer">
+                <button id="nav-models" class="nav-item">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                    </svg>
+                    Models
+                </button>
+                <button id="nav-memory" class="nav-item">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z"/>
+                        <path d="M12 6v6l4 2"/>
+                    </svg>
+                    Memory
+                </button>
+                <button id="nav-profiles" class="nav-item">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                        <circle cx="12" cy="7" r="4"/>
+                    </svg>
+                    Profiles
+                </button>
+                <button id="nav-settings" class="nav-item">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="3"/>
+                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                    </svg>
+                    Settings
+                </button>
+            </div>
+        </aside>
+        
+        <!-- Main Content -->
+        <main id="main-content" class="main-content">
+            <!-- Chat View (default) -->
+            <div id="view-chat" class="view active">
+                <div class="chat-container">
+                    <!-- Chat Header -->
+                    <header class="chat-header">
+                        <button id="toggle-sidebar" class="btn-icon mobile-only">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M3 12h18M3 6h18M3 18h18"/>
+                            </svg>
+                        </button>
+                        
+                        <div class="chat-header-info">
+                            <h2 id="chat-title" class="chat-title">New Chat</h2>
+                            <div class="chat-meta">
+                                <span id="current-model" class="model-badge">No model selected</span>
+                                <span id="current-profile" class="profile-badge">Default</span>
+                            </div>
+                        </div>
+                        
+                        <div class="chat-header-actions">
+                            <button id="btn-branch-nav" class="btn-icon" title="Navigate branches">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M6 3v12"/>
+                                    <circle cx="18" cy="6" r="3"/>
+                                    <circle cx="6" cy="18" r="3"/>
+                                    <path d="M18 9a9 9 0 0 1-9 9"/>
+                                </svg>
+                            </button>
+                            <button id="btn-chat-options" class="btn-icon" title="Chat options">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <circle cx="12" cy="12" r="1"/>
+                                    <circle cx="19" cy="12" r="1"/>
+                                    <circle cx="5" cy="12" r="1"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </header>
+                    
+                    <!-- Messages Area -->
+                    <div id="messages-container" class="messages-container">
+                        <div id="messages-list" class="messages-list">
+                            <!-- Welcome message for new chats -->
+                            <div id="welcome-message" class="welcome-message">
+                                <div class="welcome-icon">⚡</div>
+                                <h2>Welcome to UltraChat</h2>
+                                <p>Start a conversation with your local AI models.</p>
+                                <div class="welcome-hints">
+                                    <div class="hint" data-prompt="Explain quantum computing in simple terms">
+                                        <span>💡</span> Explain quantum computing
+                                    </div>
+                                    <div class="hint" data-prompt="Write a Python function to sort a list">
+                                        <span>🐍</span> Write Python code
+                                    </div>
+                                    <div class="hint" data-prompt="What are the best practices for API design?">
+                                        <span>🔧</span> API design tips
+                                    </div>
+                                </div>
+                            </div>
+                            <!-- Messages will be inserted here -->
+                        </div>
+                    </div>
+                    
+                    <!-- Input Area -->
+                    <div class="input-area">
+                        <div class="input-container">
+                            <!-- Feature toggles -->
+                            <div class="input-toggles">
+                                <label class="toggle-pill" title="Search the web for current information">
+                                    <input type="checkbox" id="toggle-web-search">
+                                    <span class="toggle-icon">
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <circle cx="11" cy="11" r="8"/>
+                                            <path d="M21 21l-4.35-4.35"/>
+                                        </svg>
+                                    </span>
+                                    <span class="toggle-label">Web</span>
+                                </label>
+                                <label class="toggle-pill" title="Include memory context">
+                                    <input type="checkbox" id="toggle-memory" checked>
+                                    <span class="toggle-icon">
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path d="M12 2a10 10 0 0 1 10 10c0 5.523-4.477 10-10 10S2 17.523 2 12"/>
+                                            <path d="M12 6v6l4 2"/>
+                                        </svg>
+                                    </span>
+                                    <span class="toggle-label">Memory</span>
+                                </label>
+                            </div>
+                            <div class="input-wrapper">
+                                <textarea 
+                                    id="message-input" 
+                                    placeholder="Send a message..." 
+                                    rows="1"
+                                    autofocus
+                                ></textarea>
+                                <div class="input-actions">
+                                    <button id="btn-stop" class="btn-icon btn-stop hidden" title="Stop generating">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                                            <rect x="6" y="6" width="12" height="12" rx="2"/>
+                                        </svg>
+                                    </button>
+                                    <button id="btn-send" class="btn-icon btn-send" title="Send message">
+                                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path d="M22 2L11 13"/>
+                                            <path d="M22 2l-7 20-4-9-9-4 20-7z"/>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="input-footer">
+                                <span class="input-hint">Enter to send · Shift+Enter for new line</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Models View -->
+            <div id="view-models" class="view">
+                <div class="page-container">
+                    <header class="page-header">
+                        <button onclick="window.switchToChat()" class="btn btn-ghost btn-sm back-btn">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M19 12H5M12 19l-7-7 7-7"/>
+                            </svg>
+                            Back to Chat
+                        </button>
+                        <h1 class="page-title">Models</h1>
+                        <p class="page-description">Manage and download Ollama models</p>
+                    </header>
+                    
+                    <div class="models-content">
+                        <!-- Connection Status -->
+                        <div id="ollama-status" class="status-banner">
+                            <span class="status-indicator"></span>
+                            <span class="status-text">Checking Ollama connection...</span>
+                        </div>
+                        
+                        <!-- Pull Model -->
+                        <div class="card">
+                            <h3 class="card-title">Download Model</h3>
+                            <div class="pull-model-form">
+                                <input type="text" id="pull-model-name" placeholder="e.g., llama3.2, mistral, gemma3" class="input">
+                                <button id="btn-pull-model" class="btn btn-primary">
+                                    Download
+                                </button>
+                            </div>
+                            <div id="pull-progress" class="pull-progress hidden">
+                                <div class="progress-bar">
+                                    <div class="progress-fill"></div>
+                                </div>
+                                <span class="progress-text">Downloading...</span>
+                            </div>
+                        </div>
+                        
+                        <!-- Installed Models -->
+                        <div class="card">
+                            <div class="card-header">
+                                <h3 class="card-title">Installed Models</h3>
+                                <button id="btn-refresh-models" class="btn btn-ghost btn-sm">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M23 4v6h-6"/>
+                                        <path d="M1 20v-6h6"/>
+                                        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                                    </svg>
+                                    Refresh
+                                </button>
+                            </div>
+                            <div id="models-list" class="models-list">
+                                <!-- Models loaded dynamically -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Memory View -->
+            <div id="view-memory" class="view">
+                <div class="page-container">
+                    <header class="page-header">
+                        <button onclick="window.switchToChat()" class="btn btn-ghost btn-sm back-btn">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M19 12H5M12 19l-7-7 7-7"/>
+                            </svg>
+                            Back to Chat
+                        </button>
+                        <h1 class="page-title">Memory</h1>
+                        <p class="page-description">Manage persistent knowledge and context</p>
+                    </header>
+                    
+                    <div class="memory-content">
+                        <!-- Add Memory -->
+                        <div class="card">
+                            <h3 class="card-title">Add Memory</h3>
+                            <div class="add-memory-form">
+                                <textarea id="memory-content" placeholder="Add something to remember..." class="input" rows="3"></textarea>
+                                <div class="memory-options">
+                                    <select id="memory-category" class="select">
+                                        <option value="fact">Fact</option>
+                                        <option value="preference">Preference</option>
+                                        <option value="instruction">Instruction</option>
+                                        <option value="context">Context</option>
+                                        <option value="other">Other</option>
+                                    </select>
+                                    <select id="memory-importance" class="select">
+                                        <option value="3">Low priority</option>
+                                        <option value="5" selected>Normal</option>
+                                        <option value="7">High priority</option>
+                                        <option value="10">Critical</option>
+                                    </select>
+                                    <button id="btn-add-memory" class="btn btn-primary">Add</button>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Memory Stats -->
+                        <div id="memory-stats" class="memory-stats">
+                            <!-- Stats loaded dynamically -->
+                        </div>
+                        
+                        <!-- Memory List -->
+                        <div class="card">
+                            <div class="card-header">
+                                <h3 class="card-title">All Memories</h3>
+                                <div class="memory-filters">
+                                    <select id="filter-category" class="select select-sm">
+                                        <option value="">All categories</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div id="memories-list" class="memories-list">
+                                <!-- Memories loaded dynamically -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Profiles View -->
+            <div id="view-profiles" class="view">
+                <div class="page-container">
+                    <header class="page-header">
+                        <button onclick="window.switchToChat()" class="btn btn-ghost btn-sm back-btn">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M19 12H5M12 19l-7-7 7-7"/>
+                            </svg>
+                            Back to Chat
+                        </button>
+                        <h1 class="page-title">Profiles</h1>
+                        <p class="page-description">Create and manage chat profiles with custom settings</p>
+                    </header>
+                    
+                    <div class="profiles-content">
+                        <!-- Create Profile -->
+                        <div class="card">
+                            <h3 class="card-title">Create Profile</h3>
+                            <form id="create-profile-form" class="profile-form">
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label for="profile-name">Name</label>
+                                        <input type="text" id="profile-name" placeholder="My Profile" class="input" required>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="profile-model">Default Model</label>
+                                        <select id="profile-model" class="select">
+                                            <!-- Models loaded dynamically -->
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label for="profile-system">System Prompt</label>
+                                    <textarea id="profile-system" placeholder="You are a helpful assistant..." class="input" rows="4"></textarea>
+                                </div>
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label for="profile-temp">Temperature: <span id="temp-value">0.7</span></label>
+                                        <input type="range" id="profile-temp" min="0" max="2" step="0.1" value="0.7" class="slider">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="profile-max-tokens">Max Tokens</label>
+                                        <input type="number" id="profile-max-tokens" value="4096" min="1" max="128000" class="input">
+                                    </div>
+                                </div>
+                                <button type="submit" class="btn btn-primary">Create Profile</button>
+                            </form>
+                        </div>
+                        
+                        <!-- Profile Templates -->
+                        <div class="card">
+                            <h3 class="card-title">Quick Templates</h3>
+                            <div id="profile-templates" class="profile-templates">
+                                <!-- Templates loaded dynamically -->
+                            </div>
+                        </div>
+                        
+                        <!-- Existing Profiles -->
+                        <div class="card">
+                            <h3 class="card-title">Your Profiles</h3>
+                            <div id="profiles-list" class="profiles-list">
+                                <!-- Profiles loaded dynamically -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Settings View -->
+            <div id="view-settings" class="view">
+                <div class="page-container">
+                    <header class="page-header">
+                        <button onclick="window.switchToChat()" class="btn btn-ghost btn-sm back-btn">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M19 12H5M12 19l-7-7 7-7"/>
+                            </svg>
+                            Back to Chat
+                        </button>
+                        <h1 class="page-title">Settings</h1>
+                        <p class="page-description">Configure UltraChat preferences</p>
+                    </header>
+                    
+                    <div class="settings-content">
+                        <!-- Ollama Settings -->
+                        <div class="card">
+                            <h3 class="card-title">Ollama Connection</h3>
+                            <div class="form-group">
+                                <label for="setting-ollama-host">Ollama Host</label>
+                                <input type="text" id="setting-ollama-host" placeholder="http://localhost:11434" class="input">
+                            </div>
+                            <div class="form-group">
+                                <label for="setting-default-model">Default Model</label>
+                                <select id="setting-default-model" class="select">
+                                    <!-- Models loaded dynamically -->
+                                </select>
+                            </div>
+                        </div>
+                        
+                        <!-- Chat Defaults -->
+                        <div class="card">
+                            <h3 class="card-title">Chat Defaults</h3>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="setting-temperature">Temperature: <span id="setting-temp-value">0.7</span></label>
+                                    <input type="range" id="setting-temperature" min="0" max="2" step="0.1" value="0.7" class="slider">
+                                </div>
+                                <div class="form-group">
+                                    <label for="setting-max-tokens">Max Tokens</label>
+                                    <input type="number" id="setting-max-tokens" value="4096" class="input">
+                                </div>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="setting-context-length">Context Length</label>
+                                    <input type="number" id="setting-context-length" value="8192" class="input">
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Storage Settings -->
+                        <div class="card">
+                            <h3 class="card-title">Storage</h3>
+                            <div class="form-group">
+                                <label>Current Data Location</label>
+                                <div id="storage-path" class="storage-path">Loading...</div>
+                            </div>
+                            <div class="form-group">
+                                <label for="setting-data-dir">Data Directory</label>
+                                <input type="text" id="setting-data-dir" placeholder="data" class="input">
+                                <small class="form-hint">Relative to application directory or absolute path</small>
+                            </div>
+                        </div>
+                        
+                        <!-- UI Settings -->
+                        <div class="card">
+                            <h3 class="card-title">Interface</h3>
+                            <div class="form-group toggle-group">
+                                <label for="setting-stream">Enable streaming responses</label>
+                                <input type="checkbox" id="setting-stream" checked class="toggle">
+                            </div>
+                            <div class="form-group toggle-group">
+                                <label for="setting-timestamps">Show timestamps</label>
+                                <input type="checkbox" id="setting-timestamps" checked class="toggle">
+                            </div>
+                            <div class="form-group toggle-group">
+                                <label for="setting-compact">Compact mode</label>
+                                <input type="checkbox" id="setting-compact" class="toggle">
+                            </div>
+                        </div>
+                        
+                        <!-- Actions -->
+                        <div class="settings-actions">
+                            <button id="btn-save-settings" class="btn btn-primary">Save Settings</button>
+                            <button id="btn-reset-settings" class="btn btn-ghost">Reset to Defaults</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    
+    <!-- Toast Container -->
+    <div id="toast-container" class="toast-container"></div>
+    
+    <!-- Modal Container -->
+    <div id="modal-container" class="modal-container hidden"></div>
+    
+    <!-- Scripts -->
+    <script type="module" src="/js/app.js"></script>
+</body>
+</html>

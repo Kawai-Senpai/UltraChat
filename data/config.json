@@ -1,0 +1,32 @@
+{
+  "app_name": "UltraChat",
+  "version": "1.0.0",
+  "debug": false,
+  "host": "127.0.0.1",
+  "port": 8000,
+  "storage": {
+    "data_dir": "data",
+    "db_name": "ultrachat.db",
+    "memories_dir": "memories",
+    "exports_dir": "exports"
+  },
+  "ollama": {
+    "host": "http://localhost:11434",
+    "default_model": "llama3.2",
+    "timeout": 120
+  },
+  "chat_defaults": {
+    "temperature": 0.7,
+    "top_p": 0.9,
+    "top_k": 40,
+    "max_tokens": 4096,
+    "context_length": 8192
+  },
+  "ui": {
+    "theme": "dark",
+    "stream_enabled": true,
+    "show_timestamps": true,
+    "compact_mode": false,
+    "code_theme": "monokai"
+  }
+}
