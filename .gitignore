@@ -1,2 +1,7 @@
 .infinitecode
 DESIGN_SYSTEM.md
+pycache/
+__pycache__/
+*.pyc
+.env
+.env.*
