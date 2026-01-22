@@ -27,6 +27,40 @@ def format_size(size_bytes: int) -> str:
     return f"{size_bytes:.1f} PB"
 
 
+def normalize_quantization_value(quantization: Optional[str]) -> Optional[str]:
+    """Normalize quantization inputs. Returns None for full precision/original."""
+    if quantization is None:
+        return None
+
+    if isinstance(quantization, str):
+        normalized = quantization.strip().lower()
+        if normalized in ("fp32", "original", "full", "none", "default"):
+            return None
+        if normalized in ("4bit", "8bit", "fp16"):
+            return normalized
+        return normalized
+
+    return quantization
+
+
+def normalize_quantization_list(quantizations: Optional[List[str]]) -> List[Optional[str]]:
+    """Normalize quantization list and remove duplicates while preserving order."""
+    normalized: List[Optional[str]] = []
+    if quantizations:
+        for quant in quantizations:
+            value = normalize_quantization_value(quant)
+            if value not in normalized:
+                normalized.append(value)
+    if not normalized:
+        normalized = [None]
+    return normalized
+
+
+def quantization_label(quantization: Optional[str]) -> str:
+    """Human-friendly quantization label for UI."""
+    return "original" if quantization is None else str(quantization)
+
+
 class ModelService:
     """
     Handles HuggingFace model operations including:
@@ -138,6 +172,8 @@ class ModelService:
         # Normalize - if single string passed, convert to list
         if isinstance(quantizations, str):
             quantizations = [quantizations]
+        quantizations = normalize_quantization_list(quantizations)
+        display_quants = [quantization_label(q) for q in quantizations]
         
         # Queue for progress events from the download thread
         progress_queue = Queue()
@@ -148,7 +184,7 @@ class ModelService:
         try:
             yield create_status_event("starting", {
                 "model_id": model_id,
-                "quantizations": quantizations or ["fp32"],
+                "quantizations": display_quants,
                 "keep_cache": keep_cache,
             })
             
@@ -220,7 +256,7 @@ class ModelService:
                             yield create_status_event(status, {
                                 "model_id": model_id,
                                 "message": message,
-                                "quantizations": quantizations or ["fp32"],
+                                "quantizations": display_quants,
                                 "files_completed": files_completed,
                                 "files_total": files_total,
                                 "percent": progress.get("percent", 0),
@@ -242,7 +278,7 @@ class ModelService:
                     yield create_status_event("heartbeat", {
                         "model_id": model_id,
                         "message": heartbeat_msg,
-                        "quantizations": quantizations or ["fp32"],
+                        "quantizations": display_quants,
                         "files_completed": last_files_completed,
                         "files_total": last_files_total,
                     })
@@ -318,11 +354,12 @@ class ModelService:
     ) -> Dict[str, Any]:
         """Delete a locally downloaded model."""
         try:
-            success = self.manager.delete_local_model(model_id, quantization)
+            normalized_quant = normalize_quantization_value(quantization)
+            success = self.manager.delete_local_model(model_id, normalized_quant)
             
             if success:
                 # Remove from registry
-                reg_key = f"{model_id}__{quantization}" if quantization else model_id
+                reg_key = f"{model_id}__{normalized_quant}" if normalized_quant else model_id
                 await ModelRegistry.delete(reg_key)
                 return {"success": True, "message": f"Model '{model_id}' deleted"}
             else:
@@ -338,13 +375,14 @@ class ModelService:
     ) -> Dict[str, Any]:
         """Load a model into GPU memory."""
         try:
-            print(f"🔄 Loading model {model_id} with quantization {quantization}...")
-            success = await self.manager.load_model(model_id, quantization)
+            normalized_quant = normalize_quantization_value(quantization)
+            print(f"🔄 Loading model {model_id} with quantization {normalized_quant}...")
+            success = await self.manager.load_model(model_id, normalized_quant)
             print(f"   Load result: {success}")
             
             if success:
                 # Record usage
-                reg_key = f"{model_id}__{quantization}" if quantization else model_id
+                reg_key = f"{model_id}__{normalized_quant}" if normalized_quant else model_id
                 try:
                     await ModelRegistry.record_usage(reg_key)
                 except Exception as reg_err:
@@ -355,7 +393,7 @@ class ModelService:
                     "success": True,
                     "message": f"Model '{model_id}' loaded",
                     "model_id": model_id,
-                    "quantization": quantization,
+                    "quantization": normalized_quant,
                     "device": self.manager.device
                 }
             else:

@@ -202,6 +202,22 @@ def get_quantization_config(quant_type: str, allow_cpu_offload: bool = True) -> 
         raise QuantizationError(f"Unknown quantization type: {quant_type}")
 
 
+def normalize_quantization(quant_type: Optional[str]) -> Optional[str]:
+    """Normalize quantization values. Returns None for full precision/original."""
+    if quant_type is None:
+        return None
+
+    if isinstance(quant_type, str):
+        normalized = quant_type.strip().lower()
+        if normalized in ("fp32", "original", "full", "none", "default"):
+            return None
+        if normalized in ("4bit", "8bit", "fp16"):
+            return normalized
+        return normalized
+
+    return quant_type
+
+
 # ============================================
 # Model Manager
 # ============================================
@@ -285,6 +301,7 @@ class HFModelManager:
     
     def _get_model_local_path(self, model_id: str, quantization: Optional[str] = None) -> Path:
         """Get local path for a quantized model."""
+        quantization = normalize_quantization(quantization)
         safe_name = model_id.replace("/", "__")
         if quantization:
             safe_name = f"{safe_name}__{quantization}"
@@ -497,8 +514,15 @@ class HFModelManager:
             List of paths to the downloaded/quantized models
         """
         # Normalize quantizations
-        if not quantizations:
-            quantizations = [None]  # Full precision
+        normalized_quants: List[Optional[str]] = []
+        if quantizations:
+            for quant in quantizations:
+                normalized = normalize_quantization(quant)
+                if normalized not in normalized_quants:
+                    normalized_quants.append(normalized)
+        if not normalized_quants:
+            normalized_quants = [None]  # Full precision
+        quantizations = normalized_quants
         
         cache_path = self._get_model_cache_path(model_id)
         output_paths = []
@@ -845,6 +869,10 @@ class HFModelManager:
                 elif "__fp16" in name:
                     quantization = "fp16"
                     name = name.replace("__fp16", "")
+                elif "__fp32" in name:
+                    name = name.replace("__fp32", "")
+                elif "__original" in name:
+                    name = name.replace("__original", "")
                 
                 model_id = name.replace("__", "/")
                 
@@ -872,6 +900,7 @@ class HFModelManager:
     
     def delete_local_model(self, model_id: str, quantization: Optional[str] = None) -> bool:
         """Delete a locally downloaded model."""
+        quantization = normalize_quantization(quantization)
         local_path = self._get_model_local_path(model_id, quantization)
         
         if local_path.exists():
@@ -904,18 +933,34 @@ class HFModelManager:
             # Unload current model first
             self.unload_model()
             
-            # Get local path
-            local_path = self._get_model_local_path(model_id, quantization)
-            
-            # Check if downloaded
-            if not local_path.exists():
-                raise ModelNotFoundError(
-                    f"Model not found locally: {model_id}. Download it first."
-                )
-            
+            # Resolve requested quantization and paths
+            requested_quant = normalize_quantization(quantization)
+            base_path = self._get_model_local_path(model_id, None)
+            local_path = self._get_model_local_path(model_id, requested_quant)
+
+            if requested_quant is None:
+                # Full precision/original path only
+                if not base_path.exists():
+                    raise ModelNotFoundError(
+                        f"Model not found locally: {model_id}. Download it first."
+                    )
+                local_path = base_path
+            else:
+                # Prefer quantized path if it exists, otherwise fallback to original for on-the-fly quantization
+                if not (local_path.exists() and self._is_valid_model_dir(local_path)):
+                    if base_path.exists() and self._is_valid_model_dir(base_path):
+                        logger.info(
+                            f"⚙️ Using original weights for on-the-fly {requested_quant} quantization."
+                        )
+                        local_path = base_path
+                    else:
+                        raise ModelNotFoundError(
+                            f"Model not found locally: {model_id}. Download it first."
+                        )
+
             # Check for quantization marker (for 4bit/8bit)
             marker_quant = self._get_quantization_from_marker(local_path)
-            effective_quant = marker_quant or quantization
+            effective_quant = marker_quant or requested_quant
             
             logger.info(f"📦 Loading tokenizer for {model_id}...")
             

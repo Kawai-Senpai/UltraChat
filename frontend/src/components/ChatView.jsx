@@ -79,9 +79,10 @@ export default function ChatView({ onToggleSidebar }) {
     setShowModelDropdown(false)
     
     try {
-      await modelsAPI.loadModel(model.model_id, model.quantization)
-      setLoadedModel(modelKey)
-      toast.success(`Loaded ${model.model_id} (${model.quantization || 'fp32'})`)
+      const result = await modelsAPI.loadModel(model.model_id, model.quantization)
+      const loadedKey = result?.quantization ? `${result.model_id}__${result.quantization}` : result?.model_id
+      setLoadedModel(loadedKey || modelKey)
+      toast.success(`Loaded ${result?.model_id || model.model_id} (${result?.quantization || 'original'})`)
       await loadSystemStatus()
     } catch (error) {
       toast.error('Failed to load model: ' + error.message)
@@ -385,45 +386,51 @@ export default function ChatView({ onToggleSidebar }) {
                     </div>
                   ) : (
                     <div className="py-1">
-                      {localModels.map((model) => {
-                        const modelKey = getModelKey(model)
-                        const isLoaded = loadedModel === modelKey
-                        const isLoading = loadingModelId === modelKey
-                        const shortName = model.model_id.split('/').pop()
-                        
-                        return (
-                          <div
-                            key={modelKey}
-                            onClick={() => {
-                              if (!isLoaded && !isLoading) {
-                                handleLoadModel(model)
-                              }
-                            }}
-                            className={`flex items-center gap-2 px-3 py-2.5 transition-all select-none ${
-                              isLoaded 
-                                ? 'bg-green-500/10 text-green-400' 
-                                : isLoading
-                                  ? 'bg-blue-500/10 text-blue-400 cursor-wait'
-                                  : 'hover:bg-white/10 text-neutral-300 active:bg-white/20 cursor-pointer'
-                            }`}
-                          >
-                            {isLoading ? (
-                              <Loader2 className="w-4 h-4 animate-spin text-blue-400 shrink-0" />
-                            ) : isLoaded ? (
-                              <Check className="w-4 h-4 text-green-400 shrink-0" />
-                            ) : (
-                              <Box className="w-4 h-4 text-neutral-500 shrink-0" />
-                            )}
-                            <div className="flex-1 min-w-0">
-                              <div className="text-xs font-medium truncate">{shortName}</div>
-                              <div className="flex items-center gap-2 text-[10px] text-neutral-500">
-                                <span className="px-1 py-0.5 bg-white/5 rounded">{model.quantization || 'default'}</span>
-                                <span>{model.size_formatted}</span>
+                      {(() => {
+                        const hasExactLoadedEntry = loadedModel
+                          ? localModels.some((model) => getModelKey(model) === loadedModel)
+                          : false
+
+                        return localModels.map((model) => {
+                          const modelKey = getModelKey(model)
+                          const isLoaded = loadedModel === modelKey || (!hasExactLoadedEntry && !model.quantization && loadedModel?.startsWith(`${model.model_id}__`))
+                          const isLoading = loadingModelId === modelKey
+                          const shortName = model.model_id.split('/').pop()
+                          
+                          return (
+                            <div
+                              key={modelKey}
+                              onClick={() => {
+                                if (!isLoaded && !isLoading) {
+                                  handleLoadModel(model)
+                                }
+                              }}
+                              className={`flex items-center gap-2 px-3 py-2.5 transition-all select-none ${
+                                isLoaded 
+                                  ? 'bg-green-500/10 text-green-400' 
+                                  : isLoading
+                                    ? 'bg-blue-500/10 text-blue-400 cursor-wait'
+                                    : 'hover:bg-white/10 text-neutral-300 active:bg-white/20 cursor-pointer'
+                              }`}
+                            >
+                              {isLoading ? (
+                                <Loader2 className="w-4 h-4 animate-spin text-blue-400 shrink-0" />
+                              ) : isLoaded ? (
+                                <Check className="w-4 h-4 text-green-400 shrink-0" />
+                              ) : (
+                                <Box className="w-4 h-4 text-neutral-500 shrink-0" />
+                              )}
+                              <div className="flex-1 min-w-0">
+                                <div className="text-xs font-medium truncate">{shortName}</div>
+                                <div className="flex items-center gap-2 text-[10px] text-neutral-500">
+                                  <span className="px-1 py-0.5 bg-white/5 rounded">{model.quantization || 'original'}</span>
+                                  <span>{model.size_formatted}</span>
+                                </div>
                               </div>
                             </div>
-                          </div>
-                        )
-                      })}
+                          )
+                        })
+                      })()}
                     </div>
                   )}
                 </div>

@@ -9,7 +9,7 @@ API_PREFIX = f"/api/{API_VERSION}"
 
 # HuggingFace / Model Defaults
 DEFAULT_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"  # Small, fast, good for testing
-DEFAULT_QUANTIZATION = "4bit"  # Default quantization for downloads
+DEFAULT_QUANTIZATION = "fp32"  # Default quantization for downloads (original)
 
 # Chat Defaults
 DEFAULT_TEMPERATURE = 0.7

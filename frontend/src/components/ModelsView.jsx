@@ -8,10 +8,17 @@ import {
 } from 'lucide-react'
 
 const QUANT_OPTIONS = [
+  { value: 'original', label: 'Original', desc: 'Full precision', color: 'red' },
   { value: '4bit', label: '4-bit', desc: 'Smallest, fastest', color: 'green' },
   { value: '8bit', label: '8-bit', desc: 'Balanced', color: 'blue' },
   { value: 'fp16', label: 'FP16', desc: 'High quality', color: 'purple' },
-  { value: 'fp32', label: 'Full', desc: 'Original precision', color: 'red' },
+]
+
+const LOAD_QUANT_OPTIONS = [
+  { value: 'original', label: 'Original' },
+  { value: '4bit', label: '4-bit' },
+  { value: '8bit', label: '8-bit' },
+  { value: 'fp16', label: 'FP16' },
 ]
 
 export default function ModelsView({ onBack }) {
@@ -23,9 +30,10 @@ export default function ModelsView({ onBack }) {
   const [isSearching, setIsSearching] = useState(false)
   const [isDownloading, setIsDownloading] = useState(false)
   const [downloadProgress, setDownloadProgress] = useState(null)
-  const [selectedQuants, setSelectedQuants] = useState(['4bit']) // Array of selected quantizations
+  const [selectedQuants, setSelectedQuants] = useState(['original']) // Array of selected quantizations
   const [keepCache, setKeepCache] = useState(false)
   const [loadingModel, setLoadingModel] = useState(null)
+  const [loadQuantSelections, setLoadQuantSelections] = useState({})
 
   useEffect(() => {
     loadLocalModels()
@@ -62,9 +70,9 @@ export default function ModelsView({ onBack }) {
       toast.error('Select at least one quantization option')
       return
     }
-    
+    const displayQuants = selectedQuants.map(q => q === 'original' ? 'original' : q)
     setIsDownloading(true)
-    setDownloadProgress({ status: 'starting', model_id: modelId, quantizations: selectedQuants })
+    setDownloadProgress({ status: 'starting', model_id: modelId, quantizations: displayQuants })
     
     try {
       for await (const { event, data } of modelsAPI.downloadModel(modelId, selectedQuants, keepCache)) {
@@ -72,10 +80,10 @@ export default function ModelsView({ onBack }) {
           setDownloadProgress(prev => ({ 
             ...prev, 
             ...data, 
-            quantizations: selectedQuants 
+            quantizations: data?.quantizations || prev?.quantizations || displayQuants 
           }))
         } else if (event === 'complete' || event === 'done') {
-          toast.success(`Downloaded ${modelId} with ${selectedQuants.length} quantization(s)`)
+          toast.success(`Downloaded ${modelId} with ${displayQuants.length} option(s)`)
           loadLocalModels()
         } else if (event === 'error') {
           throw new Error(data.error || 'Download failed')
@@ -96,11 +104,14 @@ export default function ModelsView({ onBack }) {
 
   const handleLoad = async (model) => {
     const modelKey = getModelKey(model)
+    const requestedQuant = getLoadQuantization(model)
+    const loadQuant = requestedQuant === 'original' ? null : requestedQuant
     setLoadingModel(modelKey)
     try {
-      await modelsAPI.loadModel(model.model_id, model.quantization)
-      setLoadedModel(modelKey)
-      toast.success(`Loaded ${model.model_id} (${model.quantization || 'fp32'})`)
+      const result = await modelsAPI.loadModel(model.model_id, loadQuant)
+      const loadedKey = result?.quantization ? `${result.model_id}__${result.quantization}` : result?.model_id
+      setLoadedModel(loadedKey || modelKey)
+      toast.success(`Loaded ${result?.model_id || model.model_id} (${result?.quantization || 'original'})`)
       loadSystemStatus()
     } catch (error) {
       toast.error('Failed to load: ' + error.message)
@@ -108,6 +119,24 @@ export default function ModelsView({ onBack }) {
       setLoadingModel(null)
     }
   }
+
+  const getLoadQuantization = (model) => {
+    const modelKey = getModelKey(model)
+    if (loadQuantSelections[modelKey]) return loadQuantSelections[modelKey]
+    return model.quantization || 'original'
+  }
+
+  const setLoadQuantization = (model, value) => {
+    const modelKey = getModelKey(model)
+    setLoadQuantSelections(prev => ({
+      ...prev,
+      [modelKey]: value,
+    }))
+  }
+
+  const hasExactLoadedEntry = loadedModel
+    ? localModels.some(model => getModelKey(model) === loadedModel)
+    : false
 
   const handleUnload = async () => {
     try {
@@ -451,20 +480,25 @@ export default function ModelsView({ onBack }) {
               </div>
             ) : (
               <div className="grid gap-3">
-                {localModels.map((model) => (
-                  <div
-                    key={getModelKey(model)}
-                    className={`p-4 rounded-lg border transition-all ${
-                      loadedModel === getModelKey(model)
-                        ? 'bg-green-500/10 border-green-500/30'
-                        : 'bg-neutral-900/50 border-white/5 hover:border-white/10'
-                    }`}
-                  >
+                {localModels.map((model) => {
+                  const modelKey = getModelKey(model)
+                  const isLoaded = loadedModel === modelKey || (!hasExactLoadedEntry && !model.quantization && loadedModel?.startsWith(`${model.model_id}__`))
+                  const isLoading = loadingModel === modelKey
+
+                  return (
+                    <div
+                      key={modelKey}
+                      className={`p-4 rounded-lg border transition-all ${
+                        isLoaded
+                          ? 'bg-green-500/10 border-green-500/30'
+                          : 'bg-neutral-900/50 border-white/5 hover:border-white/10'
+                      }`}
+                    >
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1">
                           <span className="text-xs font-bold text-white truncate">{model.model_id}</span>
-                          {loadedModel === getModelKey(model) && (
+                          {isLoaded && (
                             <span className="flex items-center gap-1 px-1.5 py-0.5 bg-green-500/20 rounded text-[10px] text-green-400">
                               <Check className="w-3 h-3" />
                               Loaded
@@ -472,13 +506,34 @@ export default function ModelsView({ onBack }) {
                           )}
                         </div>
                         <div className="flex items-center gap-3 text-[10px] text-neutral-500">
-                          <span className="px-1.5 py-0.5 bg-white/10 rounded">{model.quantization || 'default'}</span>
+                          <span className="px-1.5 py-0.5 bg-white/10 rounded">{model.quantization || 'original'}</span>
                           <span>{formatSize(model.size)}</span>
+                        </div>
+                        <div className="mt-2 flex items-center gap-2">
+                          <span className="text-[10px] text-neutral-500 uppercase tracking-wide">Load as</span>
+                          <select
+                            value={getLoadQuantization(model)}
+                            onChange={(e) => setLoadQuantization(model, e.target.value)}
+                            disabled={!!model.quantization}
+                            className="bg-neutral-900 border border-white/10 rounded px-2 py-1 text-[10px] text-neutral-200
+                                       focus:outline-none focus:border-red-500/50 disabled:opacity-60"
+                          >
+                            {(model.quantization ? [
+                              { value: model.quantization, label: model.quantization }
+                            ] : LOAD_QUANT_OPTIONS).map(opt => (
+                              <option key={opt.value} value={opt.value}>
+                                {opt.label}
+                              </option>
+                            ))}
+                          </select>
+                          {model.quantization && (
+                            <span className="text-[10px] text-neutral-500">Fixed</span>
+                          )}
                         </div>
                       </div>
                       
                       <div className="flex items-center gap-1">
-                        {loadedModel === getModelKey(model) ? (
+                        {isLoaded ? (
                           <button
                             onClick={handleUnload}
                             className="flex items-center gap-1.5 px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30
@@ -490,22 +545,22 @@ export default function ModelsView({ onBack }) {
                         ) : (
                           <button
                             onClick={() => handleLoad(model)}
-                            disabled={loadingModel === getModelKey(model)}
+                            disabled={isLoading}
                             className="flex items-center gap-1.5 px-3 py-1.5 bg-green-500/20 hover:bg-green-500/30
                                        text-green-400 text-xs font-medium rounded-lg transition-colors
                                        disabled:opacity-50"
                           >
-                            {loadingModel === getModelKey(model) ? (
+                            {isLoading ? (
                               <Loader2 className="w-3.5 h-3.5 animate-spin" />
                             ) : (
                               <Sparkles className="w-3.5 h-3.5" />
                             )}
-                            {loadingModel === getModelKey(model) ? 'Loading...' : 'Load'}
+                            {isLoading ? 'Loading...' : 'Load'}
                           </button>
                         )}
                         <button
                           onClick={() => handleDelete(model)}
-                          disabled={loadedModel === getModelKey(model)}
+                          disabled={isLoaded}
                           className="p-2 rounded-lg hover:bg-red-500/20 text-neutral-500 hover:text-red-400
                                      transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                           title="Delete model"
@@ -515,7 +570,8 @@ export default function ModelsView({ onBack }) {
                       </div>
                     </div>
                   </div>
-                ))}
+                  )
+                })}
               </div>
             )}
           </div>
