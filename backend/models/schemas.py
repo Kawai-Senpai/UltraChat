@@ -198,27 +198,45 @@ class MemoryResponse(BaseModel):
 # ============ Model Schemas ============
 
 class ModelInfo(BaseModel):
+    model_id: str
     name: str
     size: int
-    digest: str
-    family: Optional[str] = None
-    parameter_size: Optional[str] = None
-    quantization_level: Optional[str] = None
-    modified_at: Optional[str] = None
+    size_formatted: Optional[str] = None
+    quantization: Optional[str] = None  # "4bit", "8bit", "fp16", "fp32"
+    downloaded_at: Optional[str] = None
+    local_path: Optional[str] = None
+    is_loaded: bool = False
     is_favorite: bool = False
     use_count: int = 0
     last_used_at: Optional[datetime] = None
 
 
-class ModelPullRequest(BaseModel):
-    name: str = Field(..., min_length=1)
+class HFModelSearchResult(BaseModel):
+    model_id: str
+    author: Optional[str] = None
+    downloads: Optional[int] = None
+    likes: Optional[int] = None
+    pipeline_tag: Optional[str] = None
+    tags: List[str] = []
+    created_at: Optional[str] = None
 
 
-class ModelPullProgress(BaseModel):
+class ModelDownloadRequest(BaseModel):
+    model_id: str = Field(..., min_length=1)
+    quantization: Optional[str] = None  # "4bit", "8bit", "fp16", or None
+
+
+class ModelLoadRequest(BaseModel):
+    model_id: str = Field(..., min_length=1)
+    quantization: Optional[str] = None
+
+
+class ModelDownloadProgress(BaseModel):
     status: str
-    digest: Optional[str] = None
-    total: Optional[int] = None
-    completed: Optional[int] = None
+    model_id: str
+    current_file: Optional[str] = None
+    completed_bytes: int = 0
+    total_bytes: int = 0
     percent: Optional[float] = None
 
 
@@ -228,12 +246,13 @@ class StorageSettingsUpdate(BaseModel):
     data_dir: Optional[str] = None
     memories_dir: Optional[str] = None
     exports_dir: Optional[str] = None
+    models_dir: Optional[str] = None
 
 
-class OllamaSettingsUpdate(BaseModel):
-    host: Optional[str] = None
+class ModelSettingsUpdate(BaseModel):
     default_model: Optional[str] = None
-    timeout: Optional[int] = None
+    default_quantization: Optional[str] = None
+    auto_load_last: Optional[bool] = None
 
 
 class ChatDefaultsUpdate(BaseModel):
@@ -242,6 +261,7 @@ class ChatDefaultsUpdate(BaseModel):
     top_k: Optional[int] = Field(None, ge=1, le=100)
     max_tokens: Optional[int] = Field(None, ge=1, le=128000)
     context_length: Optional[int] = Field(None, ge=1, le=128000)
+    repetition_penalty: Optional[float] = Field(None, ge=1.0, le=2.0)
 
 
 class UISettingsUpdate(BaseModel):
@@ -254,7 +274,7 @@ class UISettingsUpdate(BaseModel):
 
 class SettingsUpdate(BaseModel):
     storage: Optional[StorageSettingsUpdate] = None
-    ollama: Optional[OllamaSettingsUpdate] = None
+    model: Optional[ModelSettingsUpdate] = None
     chat_defaults: Optional[ChatDefaultsUpdate] = None
     ui: Optional[UISettingsUpdate] = None
 
@@ -263,7 +283,7 @@ class SettingsResponse(BaseModel):
     app_name: str
     version: str
     storage: Dict[str, Any]
-    ollama: Dict[str, Any]
+    model: Dict[str, Any]
     chat_defaults: Dict[str, Any]
     ui: Dict[str, Any]
 

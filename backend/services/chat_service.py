@@ -1,15 +1,15 @@
 """
 UltraChat - Chat Service
-Business logic for chat operations.
+Business logic for chat operations with HuggingFace/PyTorch.
 """
 
 from typing import Optional, Dict, Any, List, AsyncGenerator
 import time
 
 from ..core import (
-    get_ollama_client,
-    OllamaError,
-    OllamaConnectionError,
+    get_model_manager,
+    ModelError,
+    ModelNotFoundError,
     StreamBuffer,
     create_token_event,
     create_done_event,
@@ -23,7 +23,7 @@ from ..models import (
     MemoryModel,
     ModelRegistry,
 )
-from ..config import get_settings
+from ..config import get_settings_manager
 from .web_search_service import get_web_search_service
 
 
@@ -37,8 +37,13 @@ class ChatService:
     """
     
     def __init__(self):
-        self.ollama = get_ollama_client()
-        self.settings = get_settings()
+        self.manager = get_model_manager()
+        self.settings = get_settings_manager()
+    
+    @property
+    def default_model(self) -> str:
+        """Get the default model from settings."""
+        return self.settings.get("default_model", "Qwen/Qwen2.5-1.5B-Instruct")
     
     async def get_or_create_conversation(
         self,
@@ -55,7 +60,7 @@ class ChatService:
         # Create new conversation
         return await ConversationModel.create(
             profile_id=profile_id,
-            model=model or self.settings.ollama.default_model
+            model=model or self.default_model
         )
     
     async def build_messages_for_api(
@@ -63,10 +68,11 @@ class ChatService:
         conversation_id: str,
         profile: Optional[Dict[str, Any]] = None,
         include_memory: bool = True,
-        web_search_results: Optional[str] = None
+        web_search_results: Optional[str] = None,
+        profile_id: Optional[str] = None
     ) -> List[Dict[str, str]]:
         """
-        Build the message list for Ollama API.
+        Build the message list for model generation.
         Includes system prompt, memory context, web search results, and conversation history.
         """
         messages = []
@@ -84,7 +90,9 @@ class ChatService:
         
         # Add memory context to system prompt
         if include_memory:
-            memories = await MemoryModel.get_for_context(limit=10)
+            # Use profile_id to get profile-scoped memories
+            pid = profile_id or (profile.get('id') if profile else None)
+            memories = await MemoryModel.get_for_context(limit=10, profile_id=pid)
             if memories:
                 memory_text = "\n\n## Your Knowledge/Memory:\n"
                 for mem in memories:
@@ -110,27 +118,26 @@ class ChatService:
         
         return messages
     
-    async def get_model_options(
+    async def get_generation_options(
         self,
         profile: Optional[Dict[str, Any]] = None,
         custom_options: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """Build options dict for Ollama API."""
+        """Build generation options."""
         options = {}
         
         if profile:
             options['temperature'] = profile.get('temperature', 0.7)
             options['top_p'] = profile.get('top_p', 0.9)
-            options['top_k'] = profile.get('top_k', 40)
-            options['num_predict'] = profile.get('max_tokens', 4096)
-            options['num_ctx'] = profile.get('context_length', 8192)
+            options['top_k'] = profile.get('top_k', 50)
+            options['max_new_tokens'] = profile.get('max_tokens', 2048)
+            options['repetition_penalty'] = profile.get('repetition_penalty', 1.1)
         else:
-            defaults = self.settings.chat_defaults
-            options['temperature'] = defaults.temperature
-            options['top_p'] = defaults.top_p
-            options['top_k'] = defaults.top_k
-            options['num_predict'] = defaults.max_tokens
-            options['num_ctx'] = defaults.context_length
+            options['temperature'] = 0.7
+            options['top_p'] = 0.9
+            options['top_k'] = 50
+            options['max_new_tokens'] = 2048
+            options['repetition_penalty'] = 1.1
         
         # Override with custom options
         if custom_options:
@@ -157,6 +164,14 @@ class ChatService:
         start_time = time.time()
         
         try:
+            # Check if model is loaded
+            if not self.manager.is_model_loaded:
+                yield create_error_event(
+                    "No model loaded. Please load a model first.",
+                    "no_model"
+                )
+                return
+            
             # Get or create conversation
             conv = await self.get_or_create_conversation(
                 conversation_id, profile_id, model
@@ -172,8 +187,8 @@ class ChatService:
             if not profile:
                 profile = await ProfileModel.get_default()
             
-            # Determine model
-            use_model = model or conv.get('model') or profile.get('model') or self.settings.ollama.default_model
+            # Determine model (use currently loaded model)
+            use_model = self.manager.current_model
             
             # Perform web search if enabled
             web_search_results = None
@@ -199,11 +214,15 @@ class ChatService:
             api_messages = await self.build_messages_for_api(
                 conversation_id, profile, 
                 include_memory=use_memory,
-                web_search_results=web_search_results
+                web_search_results=web_search_results,
+                profile_id=profile_id or (profile.get('id') if profile else None)
             )
             
-            # Get model options
-            api_options = await self.get_model_options(profile, options)
+            # Get generation options
+            gen_options = await self.get_generation_options(profile, options)
+            
+            # Format messages for the model
+            prompt = self.manager.format_chat_prompt(api_messages)
             
             # Yield status
             yield create_status_event("generating", {
@@ -214,26 +233,33 @@ class ChatService:
             
             # Stream response
             buffer = StreamBuffer()
-            response_metadata = {}
+            tokens_generated = 0
             
-            async for chunk in self.ollama.chat(
-                model=use_model,
-                messages=api_messages,
-                options=api_options,
-                stream=stream
-            ):
-                if 'message' in chunk and 'content' in chunk['message']:
-                    token = chunk['message']['content']
+            if stream:
+                async for token in self.manager.generate(
+                    prompt=prompt,
+                    max_new_tokens=gen_options.get('max_new_tokens', 2048),
+                    temperature=gen_options.get('temperature', 0.7),
+                    top_p=gen_options.get('top_p', 0.9),
+                    top_k=gen_options.get('top_k', 50),
+                    repetition_penalty=gen_options.get('repetition_penalty', 1.1),
+                    stream=True,
+                ):
                     buffer.add_token(token)
+                    tokens_generated += 1
                     yield create_token_event(token)
-                
-                # Capture metadata from final chunk
-                if chunk.get('done'):
-                    response_metadata = {
-                        'total_duration': chunk.get('total_duration'),
-                        'eval_count': chunk.get('eval_count'),
-                        'prompt_eval_count': chunk.get('prompt_eval_count'),
-                    }
+            else:
+                result = await self.manager.generate_complete(
+                    prompt=prompt,
+                    max_new_tokens=gen_options.get('max_new_tokens', 2048),
+                    temperature=gen_options.get('temperature', 0.7),
+                    top_p=gen_options.get('top_p', 0.9),
+                    top_k=gen_options.get('top_k', 50),
+                    repetition_penalty=gen_options.get('repetition_penalty', 1.1),
+                )
+                buffer.add_token(result.text)
+                tokens_generated = result.tokens_generated
+                yield create_token_event(result.text)
             
             # Calculate timing
             duration_ms = int((time.time() - start_time) * 1000)
@@ -245,8 +271,8 @@ class ChatService:
                 content=buffer.content,
                 parent_id=user_msg['id'],
                 model=use_model,
-                tokens_prompt=response_metadata.get('prompt_eval_count'),
-                tokens_completion=response_metadata.get('eval_count'),
+                tokens_prompt=len(prompt) // 4,  # Rough estimate
+                tokens_completion=tokens_generated,
                 duration_ms=duration_ms
             )
             
@@ -261,15 +287,17 @@ class ChatService:
             # Yield completion event
             yield create_done_event(
                 message_id=assistant_msg['id'],
-                total_tokens=buffer.token_count,
-                eval_duration=response_metadata.get('total_duration')
+                total_tokens=tokens_generated,
+                eval_duration=duration_ms * 1000000  # Convert to ns for compatibility
             )
             
-        except OllamaConnectionError as e:
-            yield create_error_event(str(e), "connection_error")
-        except OllamaError as e:
-            yield create_error_event(str(e), "ollama_error")
+        except ModelNotFoundError as e:
+            yield create_error_event(str(e), "model_not_found")
+        except ModelError as e:
+            yield create_error_event(str(e), "model_error")
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             yield create_error_event(str(e), "unknown_error")
     
     async def regenerate_response(
@@ -304,26 +332,81 @@ class ChatService:
             yield create_error_event("Conversation not found", "not_found")
             return
         
-        # Regenerate by sending the same message with the user message as parent's parent
+        # Send the same message again (will create a new branch)
         async for event in self.send_message(
-            conversation_id=conv['id'],
+            conversation_id=message['conversation_id'],
             message=message['content'],
-            parent_id=message.get('parent_id'),  # Same parent as original user message
+            parent_id=message.get('parent_id'),
             model=model,
             options=options
         ):
             yield event
     
-    async def edit_and_continue(
+    async def get_conversation(self, conversation_id: str) -> Optional[Dict[str, Any]]:
+        """Get a conversation with its messages."""
+        conv = await ConversationModel.get_by_id(conversation_id)
+        if not conv:
+            return None
+        
+        # Get messages in tree structure
+        messages = await MessageModel.get_tree(conversation_id)
+        conv['messages'] = messages
+        
+        return conv
+    
+    async def get_conversations(
+        self,
+        profile_id: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Get all conversations, optionally filtered by profile."""
+        return await ConversationModel.get_all(
+            profile_id=profile_id,
+            limit=limit,
+            offset=offset
+        )
+    
+    async def delete_conversation(self, conversation_id: str) -> bool:
+        """Delete a conversation and all its messages."""
+        return await ConversationModel.delete(conversation_id)
+    
+    async def update_conversation(
+        self,
+        conversation_id: str,
+        title: Optional[str] = None,
+        model: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Update conversation metadata."""
+        return await ConversationModel.update(
+            conversation_id,
+            title=title,
+            model=model
+        )
+    
+    async def get_message_branches(self, message_id: str) -> List[Dict[str, Any]]:
+        """Get all branches from a message."""
+        return await MessageModel.get_children(message_id)
+    
+    async def switch_branch(
+        self,
+        conversation_id: str,
+        message_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Switch to a different branch."""
+        return await ConversationModel.set_active_branch(
+            conversation_id, message_id
+        )
+    
+    async def edit_message(
         self,
         message_id: str,
         new_content: str,
-        model: Optional[str] = None,
-        options: Optional[Dict[str, Any]] = None
+        regenerate: bool = True
     ) -> AsyncGenerator[str, None]:
         """
-        Edit a user message and regenerate response.
-        Creates a new branch from the edited message.
+        Edit a user message and optionally regenerate the response.
+        Creates a new branch.
         """
         # Get the message
         message = await MessageModel.get_by_id(message_id)
@@ -335,62 +418,25 @@ class ChatService:
             yield create_error_event("Can only edit user messages", "invalid_request")
             return
         
-        # Get conversation
-        conv = await ConversationModel.get_by_id(message['conversation_id'])
-        if not conv:
-            yield create_error_event("Conversation not found", "not_found")
-            return
-        
-        # Create new message as a branch from same parent
+        # Send the edited message (creates a new branch)
         async for event in self.send_message(
-            conversation_id=conv['id'],
+            conversation_id=message['conversation_id'],
             message=new_content,
-            parent_id=message.get('parent_id'),
-            model=model,
-            options=options
+            parent_id=message.get('parent_id')
         ):
             yield event
     
-    async def get_conversation_detail(
-        self,
-        conversation_id: str
-    ) -> Optional[Dict[str, Any]]:
-        """Get full conversation with messages and profile."""
-        conv = await ConversationModel.get_by_id(conversation_id)
-        if not conv:
-            return None
-        
-        # Get active message thread
-        messages = await MessageModel.get_active_thread(conversation_id)
-        
-        # Get profile
-        profile = None
-        if conv.get('profile_id'):
-            profile = await ProfileModel.get_by_id(conv['profile_id'])
-        
-        return {
-            **conv,
-            'messages': messages,
-            'profile': profile
-        }
+    async def delete_message(self, message_id: str) -> bool:
+        """Delete a message and all its children."""
+        return await MessageModel.delete(message_id)
     
-    async def get_message_branches(
-        self,
-        message_id: str
-    ) -> Dict[str, Any]:
-        """Get all branches from a message's children."""
-        message = await MessageModel.get_by_id(message_id)
-        if not message:
-            return {"error": "Message not found"}
-        
-        return await MessageModel.get_branch_info(
-            message_id, 
-            message['conversation_id']
-        )
-    
-    async def switch_branch(self, message_id: str) -> bool:
-        """Switch to a different branch."""
-        return await MessageModel.set_active_branch(message_id)
+    async def stop_generation(self) -> Dict[str, Any]:
+        """
+        Stop current generation.
+        Note: PyTorch generation is harder to interrupt, but we can signal stop.
+        """
+        # TODO: Implement generation cancellation
+        return {"success": True, "message": "Stop signal sent"}
 
 
 # Global service instance

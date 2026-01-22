@@ -2,15 +2,19 @@
 UltraChat - Core Package
 """
 
-from .ollama_client import (
-    OllamaClient,
-    OllamaError,
-    OllamaConnectionError,
-    OllamaModelError,
+from .hf_model_manager import (
+    HFModelManager,
     ModelInfo,
-    PullProgress,
-    get_ollama_client,
-    close_ollama_client,
+    DownloadProgress,
+    GenerationResult,
+    ModelError,
+    ModelNotFoundError,
+    ModelLoadError,
+    QuantizationError,
+    GPUError,
+    get_model_manager,
+    close_model_manager,
+    get_quantization_config,
 )
 
 from .streaming import (
@@ -26,14 +30,18 @@ from .streaming import (
 )
 
 __all__ = [
-    "OllamaClient",
-    "OllamaError",
-    "OllamaConnectionError",
-    "OllamaModelError",
+    "HFModelManager",
     "ModelInfo",
-    "PullProgress",
-    "get_ollama_client",
-    "close_ollama_client",
+    "DownloadProgress",
+    "GenerationResult",
+    "ModelError",
+    "ModelNotFoundError",
+    "ModelLoadError",
+    "QuantizationError",
+    "GPUError",
+    "get_model_manager",
+    "close_model_manager",
+    "get_quantization_config",
     "StreamEventType",
     "StreamEvent",
     "create_token_event",

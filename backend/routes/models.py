@@ -1,58 +1,123 @@
 """
 UltraChat - Model Routes
-API endpoints for model management.
+API endpoints for HuggingFace model management.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from typing import Optional
+from typing import Optional, List
+from pydantic import BaseModel
 
-from ..models.schemas import ModelPullRequest
 from ..services import get_model_service
 
 
 router = APIRouter(prefix="/models", tags=["models"])
 
 
+# ============================================
+# Request/Response Schemas
+# ============================================
+
+class ModelDownloadRequest(BaseModel):
+    """Request to download a model with multiple quantization options."""
+    model_id: str
+    quantizations: Optional[List[str]] = None  # ["4bit", "8bit", "fp16"] or None for fp32
+    keep_cache: bool = False  # Keep raw HuggingFace files after quantization
+
+
+class ModelLoadRequest(BaseModel):
+    """Request to load a model into memory."""
+    model_id: str
+    quantization: Optional[str] = None
+
+
+class ModelDeleteRequest(BaseModel):
+    """Request to delete a model."""
+    model_id: str
+    quantization: Optional[str] = None
+
+
+# ============================================
+# System Status
+# ============================================
+
 @router.get("/status")
-async def check_ollama_status():
-    """Check if Ollama is running and accessible."""
+async def get_system_status():
+    """Get system status including GPU info and loaded model."""
     service = get_model_service()
-    status = await service.check_connection_with_info()
-    
+    status = await service.get_status()
     return status
 
 
-@router.get("")
-async def list_models():
-    """Get all available local models."""
+# ============================================
+# HuggingFace Model Search
+# ============================================
+
+@router.get("/search")
+async def search_hf_models(
+    q: str = Query(..., min_length=1, description="Search query"),
+    limit: int = Query(20, ge=1, le=100)
+):
+    """Search HuggingFace for text generation models."""
     service = get_model_service()
-    models = await service.list_models()
+    models = await service.search_models(q, limit=limit)
     return {"models": models}
 
 
-@router.get("/{model_name:path}")
-async def get_model_info(model_name: str):
-    """Get detailed information about a model."""
+@router.get("/popular")
+async def get_popular_models(limit: int = Query(20, ge=1, le=100)):
+    """Get popular text generation models from HuggingFace."""
     service = get_model_service()
-    info = await service.get_model_info(model_name)
+    models = await service.get_popular_models(limit=limit)
+    return {"models": models}
+
+
+@router.get("/hf/{model_id:path}")
+async def get_hf_model_info(model_id: str):
+    """Get detailed info about a HuggingFace model."""
+    service = get_model_service()
+    info = await service.get_hf_model_info(model_id)
     
     if not info:
-        raise HTTPException(status_code=404, detail="Model not found")
+        raise HTTPException(status_code=404, detail="Model not found on HuggingFace")
     
     return info
 
 
-@router.post("/pull")
-async def pull_model(request: ModelPullRequest):
+# ============================================
+# Local Model Management
+# ============================================
+
+@router.get("")
+@router.get("/local")
+async def list_local_models():
+    """Get all locally downloaded models."""
+    service = get_model_service()
+    models = await service.list_local_models()
+    return {"models": models}
+
+
+@router.post("/download")
+async def download_model(request: ModelDownloadRequest):
     """
-    Download/pull a model.
+    Download a model from HuggingFace with multiple quantization options.
     Returns Server-Sent Events with progress updates.
+    
+    Example request:
+    {
+        "model_id": "meta-llama/Llama-2-7b-chat-hf",
+        "quantizations": ["4bit", "8bit"],  // Downloads both 4-bit and 8-bit versions
+        "keep_cache": false  // Delete raw files after quantization
+    }
     """
     service = get_model_service()
     
     async def generate():
-        async for event in service.pull_model(request.name):
+        async for event in service.download_model(
+            request.model_id,
+            request.quantizations,
+            request.keep_cache,
+        ):
             yield event
     
     return StreamingResponse(
@@ -66,11 +131,11 @@ async def pull_model(request: ModelPullRequest):
     )
 
 
-@router.delete("/{model_name:path}")
-async def delete_model(model_name: str):
-    """Delete a local model."""
+@router.post("/delete")
+async def delete_model(request: ModelDeleteRequest):
+    """Delete a locally downloaded model."""
     service = get_model_service()
-    result = await service.delete_model(model_name)
+    result = await service.delete_model(request.model_id, request.quantization)
     
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("error"))
@@ -78,12 +143,63 @@ async def delete_model(model_name: str):
     return result
 
 
-@router.post("/{model_name:path}/favorite")
-async def set_favorite(model_name: str, is_favorite: bool = True):
+@router.delete("/{model_id:path}")
+async def delete_model_by_path(model_id: str, quantization: Optional[str] = None):
+    """Delete a locally downloaded model by path."""
+    service = get_model_service()
+    result = await service.delete_model(model_id, quantization)
+    
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error"))
+    
+    return result
+
+
+# ============================================
+# Model Loading/Unloading
+# ============================================
+
+@router.post("/load")
+async def load_model(request: ModelLoadRequest):
+    """Load a model into GPU memory."""
+    service = get_model_service()
+    result = await service.load_model(request.model_id, request.quantization)
+    
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error"))
+    
+    return result
+
+
+@router.post("/unload")
+async def unload_model():
+    """Unload the current model from memory."""
+    service = get_model_service()
+    result = await service.unload_model()
+    return result
+
+
+@router.get("/loaded")
+async def get_loaded_model():
+    """Get info about the currently loaded model."""
+    service = get_model_service()
+    loaded = await service.get_loaded_model()
+    
+    if not loaded:
+        return {"loaded": False}
+    
+    return {"loaded": True, **loaded}
+
+
+# ============================================
+# Favorites & Recent
+# ============================================
+
+@router.post("/{model_id:path}/favorite")
+async def set_favorite(model_id: str, is_favorite: bool = True):
     """Set or unset a model as favorite."""
     service = get_model_service()
-    success = await service.set_favorite(model_name, is_favorite)
-    
+    success = await service.set_favorite(model_id, is_favorite)
     return {"success": success}
 
 

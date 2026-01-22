@@ -1,0 +1,288 @@
+/* Import Montserrat from Google Fonts - must be before @import tailwindcss */
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;500;600;700;900&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@import "tailwindcss";
+
+/* Hide scrollbars globally but allow scrolling */
+* {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+*::-webkit-scrollbar {
+  display: none;
+}
+
+/* Base styles following DESIGN_SYSTEM.md */
+html, body {
+  @apply bg-neutral-950 text-neutral-300 antialiased m-0 p-0;
+  font-family: 'Montserrat', 'Inter', system-ui, sans-serif;
+  font-weight: 300;
+}
+
+#root {
+  @apply h-screen w-screen overflow-hidden;
+}
+
+/* Code font */
+code, pre, .font-mono {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+/* ===== Interactive Elements ===== */
+/* Global cursor and hover for buttons and clickable elements */
+button, a, [role="button"], label[for], select, input[type="checkbox"], input[type="radio"] {
+  cursor: pointer;
+}
+
+button:disabled, a[disabled] {
+  cursor: not-allowed;
+}
+
+/* Global hover transition for smooth animations */
+button, a, select, input, textarea {
+  transition: all 0.15s ease;
+}
+
+/* Button hover effects */
+button:not(:disabled):hover {
+  filter: brightness(1.1);
+}
+
+button:not(:disabled):active {
+  transform: scale(0.98);
+}
+
+/* Link hover effects */
+a:not(:disabled):hover {
+  opacity: 0.9;
+}
+
+/* Focus ring - red accent */
+*:focus-visible {
+  @apply outline-none ring-2 ring-red-500/50;
+}
+
+/* Selection */
+::selection {
+  @apply bg-red-500/30 text-white;
+}
+
+/* Custom Form Controls */
+/* Select dropdown styling */
+select {
+  @apply bg-neutral-900 text-white;
+  background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%239ca3af' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+  background-position: right 0.5rem center;
+  background-repeat: no-repeat;
+  background-size: 1.5em 1.5em;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  padding-right: 2.5rem;
+}
+
+select option {
+  @apply bg-neutral-900 text-white py-2;
+}
+
+/* Range slider styling */
+input[type="range"] {
+  @apply appearance-none bg-transparent w-full h-1 cursor-pointer;
+}
+
+input[type="range"]::-webkit-slider-runnable-track {
+  @apply bg-white/10 h-1.5 rounded-full;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  @apply appearance-none w-4 h-4 bg-red-500 rounded-full -mt-1 cursor-pointer;
+  transition: transform 0.15s ease;
+}
+
+input[type="range"]::-webkit-slider-thumb:hover {
+  @apply scale-110;
+}
+
+input[type="range"]::-moz-range-track {
+  @apply bg-white/10 h-1.5 rounded-full;
+}
+
+input[type="range"]::-moz-range-thumb {
+  @apply w-4 h-4 bg-red-500 rounded-full border-0 cursor-pointer;
+}
+
+/* Checkbox styling */
+input[type="checkbox"] {
+  @apply appearance-none w-5 h-5 bg-white/5 border border-white/20 rounded cursor-pointer relative;
+  transition: all 0.15s ease;
+}
+
+input[type="checkbox"]:checked {
+  @apply bg-red-500 border-red-500;
+}
+
+input[type="checkbox"]:checked::after {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 2px;
+  width: 5px;
+  height: 10px;
+  border: solid white;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+/* Skeleton animation */
+@keyframes skeleton-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.7; }
+}
+
+.skeleton {
+  @apply bg-white/10 rounded;
+  animation: skeleton-pulse 1.5s ease-in-out infinite;
+}
+
+/* Toast animations */
+@keyframes toast-in {
+  from { transform: translateY(100%); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes toast-out {
+  from { transform: translateY(0); opacity: 1; }
+  to { transform: translateY(100%); opacity: 0; }
+}
+
+.toast-enter {
+  animation: toast-in 0.3s ease-out forwards;
+}
+
+.toast-exit {
+  animation: toast-out 0.2s ease-in forwards;
+}
+
+/* Fade in animation */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.3s ease-out forwards;
+}
+
+/* Slide in from left */
+@keyframes slideInLeft {
+  from { opacity: 0; transform: translateX(-20px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.animate-slideInLeft {
+  animation: slideInLeft 0.3s ease-out forwards;
+}
+
+/* Pulse glow for active states */
+@keyframes pulseGlow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+  50% { box-shadow: 0 0 0 4px rgba(239, 68, 68, 0); }
+}
+
+.animate-pulseGlow {
+  animation: pulseGlow 2s infinite;
+}
+
+/* Typing indicator animation */
+@keyframes typing {
+  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-4px); }
+}
+
+.typing-dot {
+  animation: typing 1.4s infinite;
+}
+
+.typing-dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.typing-dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+/* Prose styling for markdown content */
+.prose {
+  @apply text-neutral-200;
+}
+
+.prose h1, .prose h2, .prose h3, .prose h4 {
+  @apply text-white font-bold;
+}
+
+.prose a {
+  @apply text-red-400 hover:text-red-300 no-underline;
+}
+
+.prose code {
+  @apply bg-white/10 px-1.5 py-0.5 rounded text-red-400 text-xs;
+}
+
+.prose pre {
+  @apply bg-neutral-900 border border-white/10 rounded-lg p-4 overflow-x-auto;
+}
+
+.prose pre code {
+  @apply bg-transparent p-0 text-neutral-200;
+}
+
+.prose blockquote {
+  @apply border-l-2 border-red-500 pl-4 italic text-neutral-400;
+}
+
+.prose ul, .prose ol {
+  @apply space-y-1;
+}
+
+.prose li {
+  @apply text-neutral-300;
+}
+
+.prose li::marker {
+  @apply text-red-400;
+}
+
+.prose hr {
+  @apply border-white/10;
+}
+
+.prose table {
+  @apply w-full border-collapse;
+}
+
+.prose th, .prose td {
+  @apply border border-white/10 px-3 py-2 text-left;
+}
+
+.prose th {
+  @apply bg-white/5 font-bold text-white;
+}
+
+/* Custom scrollbar for code blocks only */
+pre::-webkit-scrollbar {
+  display: block;
+  height: 6px;
+}
+
+pre::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+
+pre::-webkit-scrollbar-thumb {
+  @apply bg-white/20 rounded-full;
+}
+
+pre::-webkit-scrollbar-thumb:hover {
+  @apply bg-white/30;
+}

@@ -11,17 +11,19 @@ from pydantic import BaseModel
 from pydantic_settings import BaseSettings
 
 from .constants import (
-    DEFAULT_OLLAMA_HOST,
     DEFAULT_MODEL,
+    DEFAULT_QUANTIZATION,
     DEFAULT_TEMPERATURE,
     DEFAULT_TOP_P,
     DEFAULT_TOP_K,
     DEFAULT_MAX_TOKENS,
     DEFAULT_CONTEXT_LENGTH,
+    DEFAULT_REPETITION_PENALTY,
     DEFAULT_DATA_DIR,
     DEFAULT_DB_NAME,
     DEFAULT_MEMORIES_DIR,
     DEFAULT_EXPORTS_DIR,
+    DEFAULT_MODELS_DIR,
     DEFAULT_THEME,
 )
 
@@ -32,6 +34,7 @@ class StorageSettings(BaseModel):
     db_name: str = DEFAULT_DB_NAME
     memories_dir: str = DEFAULT_MEMORIES_DIR
     exports_dir: str = DEFAULT_EXPORTS_DIR
+    models_dir: str = DEFAULT_MODELS_DIR
     
     @property
     def db_path(self) -> str:
@@ -44,13 +47,17 @@ class StorageSettings(BaseModel):
     @property
     def exports_path(self) -> str:
         return str(Path(self.data_dir) / self.exports_dir)
+    
+    @property
+    def models_path(self) -> str:
+        return str(Path(self.data_dir) / self.models_dir)
 
 
-class OllamaSettings(BaseModel):
-    """Ollama configuration."""
-    host: str = DEFAULT_OLLAMA_HOST
+class ModelSettings(BaseModel):
+    """Model configuration."""
     default_model: str = DEFAULT_MODEL
-    timeout: int = 120  # seconds
+    default_quantization: str = DEFAULT_QUANTIZATION
+    auto_load_last: bool = True  # Auto-load last used model on startup
 
 
 class ChatDefaults(BaseModel):
@@ -60,6 +67,7 @@ class ChatDefaults(BaseModel):
     top_k: int = DEFAULT_TOP_K
     max_tokens: int = DEFAULT_MAX_TOKENS
     context_length: int = DEFAULT_CONTEXT_LENGTH
+    repetition_penalty: float = DEFAULT_REPETITION_PENALTY
 
 
 class UISettings(BaseModel):
@@ -81,7 +89,7 @@ class AppSettings(BaseSettings):
     
     # Sub-settings (loaded from config file)
     storage: StorageSettings = StorageSettings()
-    ollama: OllamaSettings = OllamaSettings()
+    model: ModelSettings = ModelSettings()
     chat_defaults: ChatDefaults = ChatDefaults()
     ui: UISettings = UISettings()
     
@@ -168,6 +176,19 @@ class SettingsManager:
         """Get current settings."""
         return self._settings
     
+    def get(self, key: str, default=None):
+        """Get a setting value by key (supports dot notation)."""
+        keys = key.split(".")
+        value = self._settings.model_dump()
+        
+        for k in keys:
+            if isinstance(value, dict) and k in value:
+                value = value[k]
+            else:
+                return default
+        
+        return value
+    
     def update(self, **kwargs) -> AppSettings:
         """Update settings and persist."""
         current_data = self._settings.model_dump()
@@ -202,6 +223,10 @@ class SettingsManager:
     def get_exports_path(self) -> Path:
         """Get absolute exports directory path."""
         return self.get_absolute_path(self._settings.storage.exports_dir)
+    
+    def get_models_path(self) -> Path:
+        """Get absolute models directory path."""
+        return self.get_absolute_path(self._settings.storage.models_dir)
     
     def reset_to_defaults(self) -> AppSettings:
         """Reset all settings to defaults."""

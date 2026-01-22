@@ -26,8 +26,9 @@ async def get_settings_endpoint():
             "db_path": str(manager.get_db_path()),
             "memories_path": str(manager.get_memories_path()),
             "exports_path": str(manager.get_exports_path()),
+            "models_path": str(manager.get_models_path()),
         },
-        "ollama": settings.ollama.model_dump(),
+        "model": settings.model.model_dump(),
         "chat_defaults": settings.chat_defaults.model_dump(),
         "ui": settings.ui.model_dump(),
     }
@@ -43,8 +44,8 @@ async def update_settings(data: SettingsUpdate):
     if data.storage:
         update_data['storage'] = data.storage.model_dump(exclude_unset=True)
     
-    if data.ollama:
-        update_data['ollama'] = data.ollama.model_dump(exclude_unset=True)
+    if data.model:
+        update_data['model'] = data.model.model_dump(exclude_unset=True)
     
     if data.chat_defaults:
         update_data['chat_defaults'] = data.chat_defaults.model_dump(exclude_unset=True)
@@ -60,7 +61,7 @@ async def update_settings(data: SettingsUpdate):
             "app_name": new_settings.app_name,
             "version": new_settings.version,
             "storage": new_settings.storage.model_dump(),
-            "ollama": new_settings.ollama.model_dump(),
+            "model": new_settings.model.model_dump(),
             "chat_defaults": new_settings.chat_defaults.model_dump(),
             "ui": new_settings.ui.model_dump(),
         }
@@ -80,7 +81,7 @@ async def reset_settings():
             "app_name": new_settings.app_name,
             "version": new_settings.version,
             "storage": new_settings.storage.model_dump(),
-            "ollama": new_settings.ollama.model_dump(),
+            "model": new_settings.model.model_dump(),
             "chat_defaults": new_settings.chat_defaults.model_dump(),
             "ui": new_settings.ui.model_dump(),
         }
@@ -96,4 +97,5 @@ async def get_storage_paths():
         "db_path": str(manager.get_db_path()),
         "memories_path": str(manager.get_memories_path()),
         "exports_path": str(manager.get_exports_path()),
+        "models_path": str(manager.get_models_path()),
     }

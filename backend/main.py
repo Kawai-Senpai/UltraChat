@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse
 
 from .config import get_settings, API_PREFIX
 from .models import init_database
-from .core import close_ollama_client
+from .core import close_model_manager, get_model_manager
 from .routes import (
     chat_router,
     models_router,
@@ -35,26 +35,27 @@ async def lifespan(app: FastAPI):
     await init_database()
     print("✅ Database initialized")
     
-    # Check Ollama connection
-    from .services import get_model_service
-    service = get_model_service()
-    connected = await service.check_connection()
-    if connected:
-        print("✅ Connected to Ollama")
+    # Check GPU availability
+    manager = get_model_manager()
+    gpu_info = manager.gpu_info
+    if gpu_info.get("available"):
+        print(f"✅ GPU available: {gpu_info.get('device_name')}")
+        mem_gb = gpu_info.get('memory_total', 0) / (1024**3)
+        print(f"   Memory: {mem_gb:.1f} GB")
     else:
-        print("⚠️  Could not connect to Ollama - make sure it's running!")
+        print("⚠️  No GPU detected - using CPU (will be slower)")
     
     yield
     
     # Shutdown
     print("👋 Shutting down UltraChat...")
-    await close_ollama_client()
+    await close_model_manager()
 
 
 # Create FastAPI app
 app = FastAPI(
     title="UltraChat",
-    description="Full-featured local LLM chat interface powered by Ollama",
+    description="Full-featured local LLM chat interface powered by HuggingFace + PyTorch",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -78,17 +79,18 @@ app.include_router(web_search_router, prefix=API_PREFIX)
 
 
 # Serve frontend static files
-frontend_dir = Path(__file__).parent.parent / "frontend"
+# In development, Vite serves frontend on port 5173
+# In production, serve built files from frontend/dist
+frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
+frontend_dev = Path(__file__).parent.parent / "frontend"
 
-if frontend_dir.exists():
-    # Mount static files (CSS, JS)
-    app.mount("/css", StaticFiles(directory=frontend_dir / "css"), name="css")
-    app.mount("/js", StaticFiles(directory=frontend_dir / "js"), name="js")
+if frontend_dist.exists():
+    # Production: serve built Vite output
+    app.mount("/assets", StaticFiles(directory=frontend_dist / "assets"), name="assets")
     
-    # Serve index.html for root and any non-API routes
     @app.get("/")
     async def serve_index():
-        return FileResponse(frontend_dir / "index.html")
+        return FileResponse(frontend_dist / "index.html")
     
     @app.get("/{path:path}")
     async def serve_spa(path: str, request: Request):
@@ -97,12 +99,22 @@ if frontend_dir.exists():
             return {"error": "Not found"}
         
         # Check if it's a static file
-        file_path = frontend_dir / path
+        file_path = frontend_dist / path
         if file_path.exists() and file_path.is_file():
             return FileResponse(file_path)
         
         # Otherwise serve index.html (SPA routing)
-        return FileResponse(frontend_dir / "index.html")
+        return FileResponse(frontend_dist / "index.html")
+
+else:
+    # Development: redirect to Vite dev server or show message
+    @app.get("/")
+    async def serve_dev_redirect():
+        return {
+            "message": "Frontend not built. Run 'npm run build' in frontend folder or use Vite dev server at http://localhost:5173",
+            "dev_url": "http://localhost:5173",
+            "api_docs": "/docs"
+        }
 
 
 # Health check endpoint
