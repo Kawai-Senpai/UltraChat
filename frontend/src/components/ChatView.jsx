@@ -6,7 +6,7 @@ import ReactMarkdown from 'react-markdown'
 import { 
   Menu, Send, Square, User, Bot, Sparkles, 
   Code, Lightbulb, Wand2, MessageSquare, Zap, Copy, Check,
-  ChevronDown, Loader2, Box, Brain, Globe
+  ChevronDown, Loader2, Box, Brain, Globe, Pencil, RotateCcw, ChevronLeft, ChevronRight, X
 } from 'lucide-react'
 
 export default function ChatView({ onToggleSidebar }) {
@@ -757,15 +757,17 @@ function MessageBubble({
                   <div className="flex items-center gap-2">
                     <button
                       onClick={() => onEditSave(message.id)}
-                      className="px-2.5 py-1 rounded-md bg-red-500 text-white text-[10px] font-medium"
+                      title="Save & Regenerate"
+                      className="p-2 rounded-md bg-red-500 text-white hover:bg-red-600"
                     >
-                      Save & Regenerate
+                      <Check className="w-3 h-3" />
                     </button>
                     <button
                       onClick={onEditCancel}
-                      className="px-2.5 py-1 rounded-md bg-white/10 text-neutral-300 text-[10px]"
+                      title="Cancel"
+                      className="p-2 rounded-md bg-white/10 text-neutral-300 hover:bg-white/20"
                     >
-                      Cancel
+                      <X className="w-3 h-3" />
                     </button>
                   </div>
                 </div>
@@ -805,26 +807,42 @@ function MessageBubble({
               {isUser ? (
                 <button
                   onClick={() => onEditStart(message)}
+                  title="Edit"
                   className="hover:text-white"
                 >
-                  Edit
+                  <Pencil className="w-3 h-3" />
                 </button>
               ) : (
-                <button
-                  onClick={() => onRegenerate(message.id)}
-                  className="hover:text-white"
-                >
-                  Regenerate
-                </button>
+                <>
+                  <button
+                    onClick={() => onRegenerate(message.id)}
+                    title="Regenerate"
+                    className="hover:text-white"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                  </button>
+                  <button
+                    onClick={handleCopy}
+                    title={copied ? 'Copied' : 'Copy'}
+                    className="hover:text-white"
+                  >
+                    {copied ? (
+                      <Check className="w-3 h-3 text-green-400" />
+                    ) : (
+                      <Copy className="w-3 h-3" />
+                    )}
+                  </button>
+                </>
               )}
               {branchInfo?.total > 1 && (
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => handleNavigate('prev')}
                     disabled={isBranchLoading || branchInfo.current_index === 0}
+                    title="Previous branch"
                     className="hover:text-white disabled:opacity-40"
                   >
-                    Prev
+                    <ChevronLeft className="w-3 h-3" />
                   </button>
                   <span className="text-neutral-400">
                     {branchInfo.current_index + 1}/{branchInfo.total}
@@ -832,36 +850,16 @@ function MessageBubble({
                   <button
                     onClick={() => handleNavigate('next')}
                     disabled={isBranchLoading || branchInfo.current_index === branchInfo.total - 1}
+                    title="Next branch"
                     className="hover:text-white disabled:opacity-40"
                   >
-                    Next
+                    <ChevronRight className="w-3 h-3" />
                   </button>
                 </div>
               )}
             </div>
           )}
           
-          {/* Copy button for assistant messages */}
-          {!isUser && !isStreaming && (
-            <button
-              onClick={handleCopy}
-              className="absolute -bottom-6 left-0 flex items-center gap-1 px-2 py-1 
-                         text-[10px] text-neutral-500 hover:text-neutral-300
-                         opacity-0 group-hover:opacity-100 transition-opacity"
-            >
-              {copied ? (
-                <>
-                  <Check className="w-3 h-3 text-green-400" />
-                  <span className="text-green-400">Copied!</span>
-                </>
-              ) : (
-                <>
-                  <Copy className="w-3 h-3" />
-                  <span>Copy</span>
-                </>
-              )}
-            </button>
-          )}
         </div>
       </div>
     </div>
