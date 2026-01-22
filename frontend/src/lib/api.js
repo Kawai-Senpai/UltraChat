@@ -58,13 +58,14 @@ class ApiClient {
   }
 
   // SSE streaming
-  async *stream(endpoint, data) {
+  async *stream(endpoint, data, options = {}) {
     const url = `${API_BASE}${endpoint}`
     
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
+      signal: options.signal,
     })
 
     if (!response.ok) {
@@ -131,8 +132,13 @@ const api = new ApiClient()
 
 // Chat API
 export const chatAPI = {
-  sendMessage: (data) => api.stream('/chat/send', data),
-  regenerate: (data) => api.stream('/chat/regenerate', data),
+  sendMessage: (data, options) => api.stream('/chat/send', data, options),
+  regenerate: (data, options) => api.stream('/chat/regenerate', data, options),
+  editMessage: (messageId, content, model = null, options) => {
+    const params = new URLSearchParams({ message_id: messageId })
+    if (model) params.set('model', model)
+    return api.stream(`/chat/edit?${params.toString()}`, { content }, options)
+  },
   listConversations: (includeArchived = false, limit = 50, offset = 0) => 
     api.get(`/chat/conversations?include_archived=${includeArchived}&limit=${limit}&offset=${offset}`),
   createConversation: (data) => api.post('/chat/conversations', data),
@@ -142,6 +148,10 @@ export const chatAPI = {
   searchConversations: (query, limit = 20) => 
     api.get(`/chat/conversations/search/${encodeURIComponent(query)}?limit=${limit}`),
   deleteMessage: (id) => api.delete(`/chat/messages/${id}`),
+  getSiblings: (messageId) => api.get(`/chat/messages/${messageId}/siblings`),
+  navigateBranch: (messageId, direction) => api.post(`/chat/messages/${messageId}/navigate/${direction}`, {}),
+  switchBranch: (messageId) => api.post(`/chat/messages/${messageId}/switch`, {}),
+  stopGeneration: () => api.post('/chat/stop', {}),
 }
 
 // Models API

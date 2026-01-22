@@ -30,6 +30,8 @@ from transformers import (
     BitsAndBytesConfig,
     TextIteratorStreamer,
     GenerationConfig,
+    StoppingCriteria,
+    StoppingCriteriaList,
 )
 
 # ============================================
@@ -234,6 +236,7 @@ class HFModelManager:
         self._hf_api = HfApi()
         self._executor = ThreadPoolExecutor(max_workers=2)
         self._generation_lock = threading.Lock()
+        self._stop_event = threading.Event()
         
         self._init_paths()
     
@@ -1016,6 +1019,10 @@ class HFModelManager:
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+    def request_stop(self):
+        """Request generation stop for the current model."""
+        self._stop_event.set()
     
     @property
     def current_model(self) -> Optional[str]:
@@ -1054,58 +1061,76 @@ class HFModelManager:
         """
         if not self.is_model_loaded:
             raise ModelError("No model loaded. Load a model first.")
-        
-        def _generate():
-            with self._generation_lock, torch.inference_mode():
-                # Tokenize
-                inputs = self._loaded_tokenizer(
-                    prompt,
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=4096,
-                ).to(self.device)
-                
-                # Create streamer
-                streamer = TextIteratorStreamer(
-                    self._loaded_tokenizer,
-                    skip_prompt=True,
-                    skip_special_tokens=True,
-                )
-                
-                # Generation config
-                gen_kwargs = {
-                    "input_ids": inputs.input_ids,
-                    "attention_mask": inputs.attention_mask,
-                    "max_new_tokens": max_new_tokens,
-                    "temperature": temperature if do_sample else 1.0,
-                    "top_p": top_p if do_sample else 1.0,
-                    "top_k": top_k if do_sample else 0,
-                    "repetition_penalty": repetition_penalty,
-                    "do_sample": do_sample,
-                    "streamer": streamer,
-                    "pad_token_id": self._loaded_tokenizer.pad_token_id,
-                    "eos_token_id": self._loaded_tokenizer.eos_token_id,
-                }
-                
-                # Start generation in background thread
-                thread = threading.Thread(
-                    target=self._loaded_model.generate,
-                    kwargs=gen_kwargs,
-                )
-                thread.start()
-                
-                # Yield tokens from streamer
-                for token in streamer:
-                    yield token
-                
-                thread.join()
-        
-        # Run generation and yield tokens
-        loop = asyncio.get_event_loop()
-        gen = _generate()
-        
-        for token in gen:
+
+        self._stop_event.clear()
+
+        class _StopOnEvent(StoppingCriteria):
+            def __init__(self, stop_event: threading.Event):
+                self.stop_event = stop_event
+
+            def __call__(self, input_ids, scores, **kwargs):
+                return self.stop_event.is_set()
+
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
+
+        def _worker():
+            try:
+                with self._generation_lock, torch.inference_mode():
+                    # Tokenize
+                    inputs = self._loaded_tokenizer(
+                        prompt,
+                        return_tensors="pt",
+                        padding=True,
+                        truncation=True,
+                        max_length=4096,
+                    ).to(self.device)
+
+                    # Create streamer
+                    streamer = TextIteratorStreamer(
+                        self._loaded_tokenizer,
+                        skip_prompt=True,
+                        skip_special_tokens=True,
+                    )
+
+                    # Generation config
+                    gen_kwargs = {
+                        "input_ids": inputs.input_ids,
+                        "attention_mask": inputs.attention_mask,
+                        "max_new_tokens": max_new_tokens,
+                        "temperature": temperature if do_sample else 1.0,
+                        "top_p": top_p if do_sample else 1.0,
+                        "top_k": top_k if do_sample else 0,
+                        "repetition_penalty": repetition_penalty,
+                        "do_sample": do_sample,
+                        "streamer": streamer,
+                        "pad_token_id": self._loaded_tokenizer.pad_token_id,
+                        "eos_token_id": self._loaded_tokenizer.eos_token_id,
+                        "stopping_criteria": StoppingCriteriaList([_StopOnEvent(self._stop_event)]),
+                    }
+
+                    # Start generation in background thread
+                    thread = threading.Thread(
+                        target=self._loaded_model.generate,
+                        kwargs=gen_kwargs,
+                        daemon=True
+                    )
+                    thread.start()
+
+                    # Stream tokens into async queue
+                    for token in streamer:
+                        loop.call_soon_threadsafe(queue.put_nowait, token)
+
+                    thread.join()
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+        while True:
+            token = await queue.get()
+            if token is None:
+                break
             yield token
     
     async def generate_complete(
@@ -1179,7 +1204,9 @@ class HFModelManager:
     def format_chat_prompt(
         self,
         messages: List[Dict[str, str]],
-        system_prompt: Optional[str] = None
+        system_prompt: Optional[str] = None,
+        enable_thinking: Optional[bool] = None,
+        tools: Optional[list] = None
     ) -> str:
         """
         Format messages for chat.
@@ -1191,12 +1218,30 @@ class HFModelManager:
         # Try to use tokenizer's chat template
         if hasattr(self._loaded_tokenizer, 'apply_chat_template'):
             try:
+                kwargs = {
+                    "tokenize": False,
+                    "add_generation_prompt": True,
+                }
+
+                if enable_thinking is not None:
+                    kwargs["enable_thinking"] = enable_thinking
+
+                if tools is not None:
+                    kwargs["tools"] = tools
+
                 formatted = self._loaded_tokenizer.apply_chat_template(
                     messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
+                    **kwargs,
                 )
                 return formatted
+            except TypeError:
+                # Tokenizer doesn't support enable_thinking/tools
+                kwargs.pop("enable_thinking", None)
+                kwargs.pop("tools", None)
+                return self._loaded_tokenizer.apply_chat_template(
+                    messages,
+                    **kwargs,
+                )
             except Exception:
                 pass
         

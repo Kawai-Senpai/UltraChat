@@ -79,6 +79,8 @@ class MessageResponse(MessageBase):
     conversation_id: str
     parent_id: Optional[str] = None
     model: Optional[str] = None
+    thinking: Optional[str] = None
+    raw_content: Optional[str] = None
     tokens_prompt: Optional[int] = None
     tokens_completion: Optional[int] = None
     duration_ms: Optional[int] = None
@@ -146,6 +148,7 @@ class ChatRequest(BaseModel):
     # Feature toggles
     web_search: bool = False  # Enable web search
     use_memory: bool = True  # Use memory context
+    enable_thinking: Optional[bool] = None  # Enable/disable model thinking if supported
 
 
 class ChatResponse(BaseModel):

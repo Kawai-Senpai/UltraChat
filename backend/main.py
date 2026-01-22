@@ -4,6 +4,8 @@ Entry point for the backend server.
 """
 
 import os
+import time
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -59,6 +61,30 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# Request logging
+http_logger = logging.getLogger("ultrachat.http")
+if not http_logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter("%(asctime)s [HTTP] %(message)s", "%H:%M:%S")
+    handler.setFormatter(formatter)
+    http_logger.addHandler(handler)
+http_logger.setLevel(logging.INFO)
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    duration_ms = int((time.time() - start_time) * 1000)
+    http_logger.info(
+        "%s %s %s %dms",
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms
+    )
+    return response
 
 # CORS middleware
 app.add_middleware(

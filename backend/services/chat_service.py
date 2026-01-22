@@ -4,6 +4,8 @@ Business logic for chat operations with HuggingFace/PyTorch.
 """
 
 from typing import Optional, Dict, Any, List, AsyncGenerator
+import re
+import logging
 import time
 
 from ..core import (
@@ -39,6 +41,50 @@ class ChatService:
     def __init__(self):
         self.manager = get_model_manager()
         self.settings = get_settings_manager()
+        self.logger = logging.getLogger("ultrachat.chat")
+
+        # Pattern for model "thinking" blocks (Qwen/Qwen3 style)
+        self._thinking_pattern = re.compile(
+            r"<think>(.*?)</think>|<thinking>(.*?)</thinking>",
+            re.DOTALL | re.IGNORECASE
+        )
+
+    def _strip_thinking(self, text: str) -> str:
+        """Remove <think> blocks from text for history/context."""
+        if not text:
+            return text
+        cleaned = re.sub(self._thinking_pattern, "", text)
+        return cleaned.strip()
+
+    def _split_thinking(self, text: str) -> (str, str):
+        """Split raw content into (thinking, final_text)."""
+        if not text:
+            return "", text
+
+        match = self._thinking_pattern.search(text)
+        if not match:
+            return "", text.strip()
+
+        thinking = match.group(1) or match.group(2) or ""
+        final_text = re.sub(self._thinking_pattern, "", text, count=1).strip()
+        return thinking.strip(), final_text
+
+    def _apply_thinking_directives(self, text: str, enable_thinking: Optional[bool]) -> (str, Optional[bool]):
+        """Parse /think and /no_think directives and return cleaned text + override."""
+        if not text:
+            return text, enable_thinking
+
+        lowered = text.lower()
+        override = enable_thinking
+
+        if "/no_think" in lowered:
+            override = False
+            text = text.replace("/no_think", "")
+        if "/think" in lowered:
+            override = True
+            text = text.replace("/think", "")
+
+        return text.strip(), override
     
     @property
     def default_model(self) -> str:
@@ -50,12 +96,13 @@ class ChatService:
         conversation_id: Optional[str] = None,
         profile_id: Optional[str] = None,
         model: Optional[str] = None
-    ) -> Dict[str, Any]:
+    ) -> Optional[Dict[str, Any]]:
         """Get existing conversation or create new one."""
         if conversation_id:
             conv = await ConversationModel.get_by_id(conversation_id)
             if conv:
                 return conv
+            return None
         
         # Create new conversation
         return await ConversationModel.create(
@@ -113,7 +160,7 @@ class ChatService:
         for msg in history:
             messages.append({
                 "role": msg['role'],
-                "content": msg['content']
+                "content": self._strip_thinking(msg['content'])
             })
         
         return messages
@@ -155,7 +202,8 @@ class ChatService:
         stream: bool = True,
         options: Optional[Dict[str, Any]] = None,
         web_search: bool = False,
-        use_memory: bool = True
+        use_memory: bool = True,
+        enable_thinking: Optional[bool] = None
     ) -> AsyncGenerator[str, None]:
         """
         Send a message and stream the response.
@@ -176,6 +224,10 @@ class ChatService:
             conv = await self.get_or_create_conversation(
                 conversation_id, profile_id, model
             )
+            if conversation_id and not conv:
+                yield create_error_event("Conversation not found", "conversation_not_found")
+                return
+
             conversation_id = conv['id']
             
             # Get profile
@@ -187,26 +239,40 @@ class ChatService:
             if not profile:
                 profile = await ProfileModel.get_default()
             
+            # Apply /think or /no_think directives and clean message
+            clean_message, enable_thinking = self._apply_thinking_directives(
+                message,
+                enable_thinking
+            )
+
             # Determine model (use currently loaded model)
             use_model = self.manager.current_model
+
+            self.logger.info(
+                "Chat request: conversation=%s model=%s profile=%s stream=%s",
+                conversation_id,
+                use_model,
+                profile_id or conv.get('profile_id'),
+                stream
+            )
             
             # Perform web search if enabled
             web_search_results = None
             if web_search:
                 try:
-                    yield create_status_event("searching", {"query": message[:100]})
+                    yield create_status_event("searching", {"query": clean_message[:100]})
                     web_service = get_web_search_service()
                     if web_service.is_available():
-                        web_search_results = await web_service.search_and_format(message, max_results=5)
+                        web_search_results = await web_service.search_and_format(clean_message, max_results=5)
                 except Exception as e:
                     print(f"Web search failed: {e}")
                     # Continue without web search
-            
+
             # Save user message
             user_msg = await MessageModel.create(
                 conversation_id=conversation_id,
                 role="user",
-                content=message,
+                content=clean_message,
                 parent_id=parent_id
             )
             
@@ -222,7 +288,10 @@ class ChatService:
             gen_options = await self.get_generation_options(profile, options)
             
             # Format messages for the model
-            prompt = self.manager.format_chat_prompt(api_messages)
+            prompt = self.manager.format_chat_prompt(
+                api_messages,
+                enable_thinking=enable_thinking
+            )
             
             # Yield status
             yield create_status_event("generating", {
@@ -264,11 +333,14 @@ class ChatService:
             # Calculate timing
             duration_ms = int((time.time() - start_time) * 1000)
             
-            # Save assistant message
+            # Save assistant message with thinking stored separately
+            thinking, final_text = self._split_thinking(buffer.content)
             assistant_msg = await MessageModel.create(
                 conversation_id=conversation_id,
                 role="assistant",
-                content=buffer.content,
+                content=final_text or buffer.content,
+                thinking=thinking or None,
+                raw_content=buffer.content,
                 parent_id=user_msg['id'],
                 model=use_model,
                 tokens_prompt=len(prompt) // 4,  # Rough estimate
@@ -278,7 +350,8 @@ class ChatService:
             
             # Update conversation title if first message
             if not conv.get('title'):
-                title = message[:50] + ('...' if len(message) > 50 else '')
+                title_source = clean_message or message
+                title = title_source[:50] + ('...' if len(title_source) > 50 else '')
                 await ConversationModel.update(conversation_id, title=title)
             
             # Record model usage
@@ -288,16 +361,26 @@ class ChatService:
             yield create_done_event(
                 message_id=assistant_msg['id'],
                 total_tokens=tokens_generated,
-                eval_duration=duration_ms * 1000000  # Convert to ns for compatibility
+                eval_duration=duration_ms * 1000000,  # Convert to ns for compatibility
+                conversation_id=conversation_id
+            )
+
+            self.logger.info(
+                "Chat completed: conversation=%s message=%s tokens=%s duration_ms=%s",
+                conversation_id,
+                assistant_msg['id'],
+                tokens_generated,
+                duration_ms
             )
             
         except ModelNotFoundError as e:
+            self.logger.warning("Model not found: %s", e)
             yield create_error_event(str(e), "model_not_found")
         except ModelError as e:
+            self.logger.error("Model error: %s", e)
             yield create_error_event(str(e), "model_error")
         except Exception as e:
-            import traceback
-            traceback.print_exc()
+            self.logger.exception("Unhandled chat error")
             yield create_error_event(str(e), "unknown_error")
     
     async def regenerate_response(
@@ -342,17 +425,27 @@ class ChatService:
         ):
             yield event
     
-    async def get_conversation(self, conversation_id: str) -> Optional[Dict[str, Any]]:
-        """Get a conversation with its messages."""
+    async def get_conversation_detail(self, conversation_id: str) -> Optional[Dict[str, Any]]:
+        """Get a conversation with its active thread messages and profile details."""
         conv = await ConversationModel.get_by_id(conversation_id)
         if not conv:
             return None
-        
-        # Get messages in tree structure
-        messages = await MessageModel.get_tree(conversation_id)
+
+        # Get active thread messages (flat list for UI)
+        messages = await MessageModel.get_active_thread(conversation_id)
         conv['messages'] = messages
-        
+
+        # Include profile details when available
+        profile = None
+        if conv.get('profile_id'):
+            profile = await ProfileModel.get_by_id(conv['profile_id'])
+        conv['profile'] = profile
+
         return conv
+
+    async def get_conversation(self, conversation_id: str) -> Optional[Dict[str, Any]]:
+        """Get a conversation with its active thread messages."""
+        return await self.get_conversation_detail(conversation_id)
     
     async def get_conversations(
         self,
@@ -425,6 +518,23 @@ class ChatService:
             parent_id=message.get('parent_id')
         ):
             yield event
+
+    async def edit_and_continue(
+        self,
+        message_id: str,
+        new_content: str,
+        model: Optional[str] = None
+    ) -> AsyncGenerator[str, None]:
+        """
+        Backward-compatible alias used by the /chat/edit route.
+        Edits a user message and regenerates from that point.
+        """
+        async for event in self.edit_message(
+            message_id=message_id,
+            new_content=new_content,
+            regenerate=True
+        ):
+            yield event
     
     async def delete_message(self, message_id: str) -> bool:
         """Delete a message and all its children."""
@@ -435,7 +545,7 @@ class ChatService:
         Stop current generation.
         Note: PyTorch generation is harder to interrupt, but we can signal stop.
         """
-        # TODO: Implement generation cancellation
+        self.manager.request_stop()
         return {"success": True, "message": "Stop signal sent"}
 
 

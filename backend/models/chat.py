@@ -167,6 +167,8 @@ class MessageModel:
         content: str,
         parent_id: Optional[str] = None,
         model: Optional[str] = None,
+        thinking: Optional[str] = None,
+        raw_content: Optional[str] = None,
         tokens_prompt: Optional[int] = None,
         tokens_completion: Optional[int] = None,
         duration_ms: Optional[int] = None
@@ -186,13 +188,39 @@ class MessageModel:
             await conn.execute(
                 """
                 INSERT INTO messages 
-                (id, conversation_id, parent_id, role, content, model, 
+                (id, conversation_id, parent_id, role, content, thinking, raw_content, model, 
                  tokens_prompt, tokens_completion, duration_ms, branch_index, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (msg_id, conversation_id, parent_id, role, content, model,
+                (msg_id, conversation_id, parent_id, role, content, thinking, raw_content, model,
                  tokens_prompt, tokens_completion, duration_ms, branch_index, now)
             )
+
+            # Make this branch active, deactivate siblings
+            if parent_id is None:
+                await conn.execute(
+                    """
+                    UPDATE messages
+                    SET is_active = 0
+                    WHERE conversation_id = ? AND parent_id IS NULL AND id != ?
+                    """,
+                    (conversation_id, msg_id)
+                )
+            else:
+                await conn.execute(
+                    """
+                    UPDATE messages
+                    SET is_active = 0
+                    WHERE conversation_id = ? AND parent_id = ? AND id != ?
+                    """,
+                    (conversation_id, parent_id, msg_id)
+                )
+
+            await conn.execute(
+                "UPDATE messages SET is_active = 1 WHERE id = ?",
+                (msg_id,)
+            )
+
             await conn.commit()
         
         # Update conversation timestamp

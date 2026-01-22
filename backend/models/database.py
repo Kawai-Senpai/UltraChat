@@ -84,6 +84,8 @@ class Database:
                     parent_id TEXT,
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
+                    thinking TEXT,
+                    raw_content TEXT,
                     model TEXT,
                     tokens_prompt INTEGER,
                     tokens_completion INTEGER,
@@ -95,6 +97,14 @@ class Database:
                     FOREIGN KEY (parent_id) REFERENCES messages(id)
                 )
             """)
+
+            # Migrate messages table (add thinking/raw_content columns if missing)
+            cursor = await db.execute("PRAGMA table_info(messages)")
+            cols = [row[1] for row in await cursor.fetchall()]
+            if "thinking" not in cols:
+                await db.execute("ALTER TABLE messages ADD COLUMN thinking TEXT")
+            if "raw_content" not in cols:
+                await db.execute("ALTER TABLE messages ADD COLUMN raw_content TEXT")
             
             # Memory table - scoped to profiles
             await db.execute("""

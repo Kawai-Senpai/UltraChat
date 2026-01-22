@@ -63,7 +63,8 @@ def create_done_event(
     message_id: str,
     total_tokens: Optional[int] = None,
     eval_duration: Optional[float] = None,
-    context: Optional[list] = None
+    context: Optional[list] = None,
+    conversation_id: Optional[str] = None
 ) -> str:
     """Create a completion event."""
     data = {"message_id": message_id}
@@ -73,6 +74,8 @@ def create_done_event(
         data["eval_duration"] = eval_duration
     if context is not None:
         data["context"] = context
+    if conversation_id is not None:
+        data["conversation_id"] = conversation_id
     
     return StreamEvent(
         event=StreamEventType.DONE,

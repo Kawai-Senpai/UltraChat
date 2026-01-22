@@ -44,7 +44,8 @@ async def send_message(request: ChatRequest):
             stream=request.stream,
             options=request.options,
             web_search=request.web_search,
-            use_memory=request.use_memory
+            use_memory=request.use_memory,
+            enable_thinking=request.enable_thinking
         ):
             yield event
     
@@ -115,6 +116,13 @@ async def edit_and_continue(
             "X-Accel-Buffering": "no"
         }
     )
+
+
+@router.post("/stop")
+async def stop_generation():
+    """Request generation stop for the current model session."""
+    service = get_chat_service()
+    return await service.stop_generation()
 
 
 # ============ Conversations ============
