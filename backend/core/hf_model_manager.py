@@ -1019,6 +1019,7 @@ class HFModelManager:
                     "trust_remote_code": True,
                     "torch_dtype": "auto",
                     "low_cpu_mem_usage": True,
+                    "attn_implementation": "sdpa",  # Scaled Dot Product Attention (faster on all GPUs)
                 }
 
                 if config is not None:
@@ -1075,6 +1076,26 @@ class HFModelManager:
             
             # Set to eval mode for inference
             self._loaded_model.eval()
+            
+            # Apply torch.compile for faster inference (optional, disabled by default due to compatibility issues)
+            settings = get_settings_manager()
+            use_torch_compile = settings.get("model.use_torch_compile", False)
+            
+            if use_torch_compile and effective_quant not in ("4bit", "8bit") and torch.cuda.is_available():
+                try:
+                    logger.info(f"⚡ Applying torch.compile for faster inference...")
+                    # Reset dynamo cache to avoid "duplicate template name" error
+                    torch._dynamo.reset()
+                    # Use default mode which is more compatible
+                    self._loaded_model = torch.compile(
+                        self._loaded_model, 
+                        mode="default",  # Balanced mode, more compatible
+                        fullgraph=False,  # Allow partial graph compilation
+                        dynamic=True,  # Handle dynamic shapes
+                    )
+                    logger.info(f"✅ torch.compile applied! First generation will be slower (compilation).")
+                except Exception as compile_error:
+                    logger.warning(f"⚠️ torch.compile failed (will use eager mode): {compile_error}")
             
             self._loaded_model_id = model_id
             self._loaded_quantization = effective_quant  # Use effective quantization
@@ -1174,7 +1195,7 @@ class HFModelManager:
                         skip_special_tokens=True,
                     )
 
-                    # Generation config
+                    # Generation config with static KV cache for faster inference
                     gen_kwargs = {
                         "input_ids": inputs.input_ids,
                         "attention_mask": inputs.attention_mask,
@@ -1184,6 +1205,7 @@ class HFModelManager:
                         "top_k": top_k if do_sample else 0,
                         "repetition_penalty": repetition_penalty,
                         "do_sample": do_sample,
+                        "use_cache": True,  # Enable KV cache (faster autoregressive generation)
                         "streamer": streamer,
                         "pad_token_id": self._loaded_tokenizer.pad_token_id,
                         "eos_token_id": self._loaded_tokenizer.eos_token_id,
@@ -1245,7 +1267,7 @@ class HFModelManager:
                 
                 prompt_tokens = inputs.input_ids.shape[1]
                 
-                # Generate
+                # Generate with KV cache for faster inference
                 outputs = self._loaded_model.generate(
                     input_ids=inputs.input_ids,
                     attention_mask=inputs.attention_mask,
@@ -1255,6 +1277,7 @@ class HFModelManager:
                     top_k=top_k if do_sample else 0,
                     repetition_penalty=repetition_penalty,
                     do_sample=do_sample,
+                    use_cache=True,  # Enable KV cache
                     pad_token_id=self._loaded_tokenizer.pad_token_id,
                     eos_token_id=self._loaded_tokenizer.eos_token_id,
                 )

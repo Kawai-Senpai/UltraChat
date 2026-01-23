@@ -4,7 +4,7 @@ import { settingsAPI, modelsAPI } from '../lib/api'
 import { useApp } from '../contexts/AppContext'
 import { 
   ArrowLeft, Save, RotateCcw, Settings, Sliders, Monitor, 
-  Database, Info, Box, Thermometer, FileText, User
+  Database, Info, Box, Thermometer, FileText, User, Zap
 } from 'lucide-react'
 
 export default function SettingsView({ onBack }) {
@@ -12,7 +12,7 @@ export default function SettingsView({ onBack }) {
   const { localModels, loadLocalModels, currentProfile } = useApp()
   
   const [settings, setSettings] = useState({
-    model: { default_model: '' },
+    model: { default_model: '', use_torch_compile: false },
     chat_defaults: {
       temperature: 0.7,
       max_tokens: 2048,
@@ -50,7 +50,7 @@ export default function SettingsView({ onBack }) {
     try {
       const data = await settingsAPI.getSettings()
       setSettings({
-        model: data.model || { default_model: '' },
+        model: data.model || { default_model: '', use_torch_compile: false },
         chat_defaults: data.chat_defaults || {
           temperature: 0.7,
           max_tokens: 2048,
@@ -95,7 +95,7 @@ export default function SettingsView({ onBack }) {
     try {
       const data = await settingsAPI.resetSettings()
       setSettings({
-        model: data.model || { default_model: '' },
+        model: data.model || { default_model: '', use_torch_compile: false },
         chat_defaults: data.chat_defaults || {
           temperature: 0.7,
           max_tokens: 2048,
@@ -232,6 +232,39 @@ export default function SettingsView({ onBack }) {
                   This model will be automatically loaded when you start the app
                 </p>
               </div>
+            </div>
+          </section>
+
+          {/* Performance Settings */}
+          <section className="p-5 bg-white/5 border border-white/10 rounded-xl">
+            <div className="flex items-center gap-3 mb-5">
+              <div className="w-10 h-10 rounded-xl bg-orange-500/20 flex items-center justify-center">
+                <Zap className="w-5 h-5 text-orange-400" />
+              </div>
+              <div>
+                <h3 className="text-xs font-black text-white">Performance</h3>
+                <p className="text-[10px] text-neutral-500">Optimize inference speed</p>
+              </div>
+            </div>
+            
+            <div className="space-y-3">
+              <div className="p-3 bg-neutral-900/50 rounded-lg border border-white/5">
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="w-2 h-2 rounded-full bg-green-500" />
+                  <span className="text-xs font-bold text-white">Always Enabled</span>
+                </div>
+                <ul className="text-[10px] text-neutral-400 space-y-1 ml-4">
+                  <li>• <span className="text-green-400">SDPA Attention</span> - Optimized attention for all GPUs</li>
+                  <li>• <span className="text-green-400">KV Cache</span> - Faster autoregressive generation</li>
+                </ul>
+              </div>
+              
+              <ToggleSetting
+                label="torch.compile (Experimental)"
+                description="JIT compile model for 20-40% faster inference. May cause issues on PyTorch 2.9.x. Only applies to fp16/fp32 models."
+                checked={settings.model.use_torch_compile || false}
+                onChange={(val) => updateSetting('model', 'use_torch_compile', val)}
+              />
             </div>
           </section>
 

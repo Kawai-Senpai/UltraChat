@@ -58,6 +58,7 @@ class ModelSettings(BaseModel):
     default_model: str = DEFAULT_MODEL
     default_quantization: str = DEFAULT_QUANTIZATION
     auto_load_last: bool = True  # Auto-load last used model on startup
+    use_torch_compile: bool = False  # torch.compile (experimental, may cause issues on some PyTorch versions)
 
 
 class ChatDefaults(BaseModel):
@@ -178,7 +179,16 @@ class SettingsManager:
         return self._settings
     
     def get(self, key: str, default=None):
-        """Get a setting value by key (supports dot notation)."""
+        """Get a setting value by key (supports dot notation). Re-reads from disk to catch updates."""
+        # Re-read config file to catch any external updates (e.g., from frontend save)
+        if self._config_path and self._config_path.exists():
+            try:
+                with open(self._config_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self._settings = AppSettings(**data)
+            except Exception:
+                pass  # Use cached settings on error
+        
         keys = key.split(".")
         value = self._settings.model_dump()
         

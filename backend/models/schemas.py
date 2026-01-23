@@ -259,6 +259,7 @@ class ModelSettingsUpdate(BaseModel):
     default_model: Optional[str] = None
     default_quantization: Optional[str] = None
     auto_load_last: Optional[bool] = None
+    use_torch_compile: Optional[bool] = None
 
 
 class ChatDefaultsUpdate(BaseModel):
