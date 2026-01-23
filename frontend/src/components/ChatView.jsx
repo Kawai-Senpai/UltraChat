@@ -255,7 +255,6 @@ export default function ChatView({ onToggleSidebar }) {
         }
         setToolEvents([])
       } else if (event === 'error') {
-        console.log('[SSE] Error event received:', data)
         throw new Error(data.error || 'Generation failed')
       }
     }
@@ -267,6 +266,7 @@ export default function ChatView({ onToggleSidebar }) {
       toast.error('No model loaded. Go to Models and load one first.')
       return
     }
+        setToolEvents([])
 
     const userMessage = input.trim()
     setToolEvents([])

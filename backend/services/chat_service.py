@@ -112,8 +112,8 @@ class ChatService:
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        # 2) Try to find JSON objects in the output
-        json_candidates = re.findall(r"\{[\s\S]*\}", text)
+        # 2) Try to find JSON objects in the output (non-greedy)
+        json_candidates = re.findall(r"\{[\s\S]*?\}", text)
         for candidate in json_candidates:
             try:
                 data = json.loads(candidate)
@@ -371,6 +371,7 @@ class ChatService:
             tool_calls_record = []  # Store tool calls for database
             current_messages = base_messages.copy()
             prompt_for_metrics = prompt
+            last_planning_thinking = ""
 
             if not enabled_tools:
                 # No tools: stream directly to user
@@ -387,108 +388,167 @@ class ChatService:
                     tokens_generated += 1
                     yield create_token_event(token)
             else:
-                # Tool mode: run planning rounds (non-stream) to decide tool calls
+                # Agentic tool loop: stream content, detect tool calls in real-time
+                # Uses the same system prompt and settings as non-tool mode
                 while tool_round < max_tool_rounds:
-                    planning_prompt = self.manager.format_chat_prompt(
+                    # Build prompt using the proper system prompt (from profile) + tool definitions
+                    agent_prompt = self.manager.format_chat_prompt(
                         current_messages,
                         enable_thinking=enable_thinking,
                         tools=tool_definitions
                     )
-                    prompt_for_metrics = planning_prompt
+                    prompt_for_metrics = agent_prompt
 
-                    # Increase max tokens for planning to allow full tool call JSON
-                    planning_max_tokens = min(512, gen_options.get('max_new_tokens', 2048))
-                    planning_buffer = ""
-                    planning_thinking = ""
-                    thinking_snapshot = ""
-                    tool_call_buffer = ""
-                    tool_call_text = None
-                    tool_call_started = False
-                    tool_thinking_enabled = self.settings.get("ui.tool_thinking", True) and enable_thinking is not False
+                    self.logger.debug(f"Tool round {tool_round + 1}: Starting agentic generation...")
 
-                    self.logger.debug(f"Tool round {tool_round + 1}: Starting planning generation...")
-
+                    # State for real-time streaming and tool detection
+                    round_buffer = ""           # Full output for this round
+                    thinking_buffer = ""        # Content inside <think> tags
+                    thinking_snapshot = ""      # Already streamed thinking content
+                    content_buffer = ""         # Content to stream (outside think/tool tags)
+                    content_snapshot = ""       # Already streamed content
+                    tool_call_buffer = ""       # Content inside <tool_call> tags
+                    tool_call_text = None       # Extracted tool call JSON
+                    
+                    # Parsing state
+                    in_thinking = False
+                    thinking_closed = False
+                    in_tool_call = False
+                    tool_call_closed = False
+                    
                     async for token in self.manager.generate(
-                        prompt=planning_prompt,
-                        max_new_tokens=planning_max_tokens,
-                        temperature=0.2,
-                        top_p=min(0.9, gen_options.get('top_p', 0.9)),
+                        prompt=agent_prompt,
+                        max_new_tokens=gen_options.get('max_new_tokens', 2048),
+                        temperature=gen_options.get('temperature', 0.7),
+                        top_p=gen_options.get('top_p', 0.9),
                         top_k=gen_options.get('top_k', 50),
                         repetition_penalty=gen_options.get('repetition_penalty', 1.1),
                         stream=True,
                     ):
-                        planning_buffer += token
-
-                        # Stream thinking deltas until tool call begins
-                        if tool_thinking_enabled and not tool_call_started:
-                            # Only stream thinking content inside <think> tags
-                            think_match = re.search(r"<think>(.*?)(</think>|$)", planning_buffer, re.DOTALL | re.IGNORECASE)
+                        round_buffer += token
+                        tokens_generated += 1
+                        
+                        # Detect thinking block start
+                        if not in_thinking and not thinking_closed:
+                            if "<think>" in round_buffer or "<thinking>" in round_buffer:
+                                in_thinking = True
+                        
+                        # Detect thinking block end
+                        if in_thinking and not thinking_closed:
+                            if "</think>" in round_buffer or "</thinking>" in round_buffer:
+                                in_thinking = False
+                                thinking_closed = True
+                                # Extract thinking content
+                                think_match = re.search(r"<think>(.*?)</think>", round_buffer, re.DOTALL | re.IGNORECASE)
+                                if not think_match:
+                                    think_match = re.search(r"<thinking>(.*?)</thinking>", round_buffer, re.DOTALL | re.IGNORECASE)
+                                if think_match:
+                                    thinking_buffer = think_match.group(1)
+                        
+                        # Stream thinking deltas if still in thinking block
+                        if in_thinking and enable_thinking is not False:
+                            think_match = re.search(r"<think>(.*?)(</think>|$)", round_buffer, re.DOTALL | re.IGNORECASE)
                             if not think_match:
-                                think_match = re.search(r"<thinking>(.*?)(</thinking>|$)", planning_buffer, re.DOTALL | re.IGNORECASE)
+                                think_match = re.search(r"<thinking>(.*?)(</thinking>|$)", round_buffer, re.DOTALL | re.IGNORECASE)
                             if think_match:
-                                thinking_text = think_match.group(1)
-                                if len(thinking_text) > len(thinking_snapshot):
-                                    delta = thinking_text[len(thinking_snapshot):]
-                                    thinking_snapshot = thinking_text
-                                    planning_thinking += delta
+                                current_thinking = think_match.group(1)
+                                if len(current_thinking) > len(thinking_snapshot):
+                                    delta = current_thinking[len(thinking_snapshot):]
+                                    thinking_snapshot = current_thinking
                                     yield create_status_event("tool_thinking_delta", {
                                         "delta": delta,
                                         "round": tool_round + 1
                                     })
-
+                        
                         # Detect tool call start
-                        if not tool_call_started and "<tool_call>" in planning_buffer:
-                            tool_call_started = True
-                            tool_call_buffer = planning_buffer.split("<tool_call>", 1)[1]
-                        elif tool_call_started:
+                        if not in_tool_call and not tool_call_closed and "<tool_call>" in round_buffer:
+                            in_tool_call = True
+                            # Get everything after <tool_call>
+                            tool_call_buffer = round_buffer.split("<tool_call>", 1)[1]
+                        elif in_tool_call and not tool_call_closed:
                             tool_call_buffer += token
-
+                        
                         # Detect tool call end
-                        if tool_call_started and "</tool_call>" in tool_call_buffer:
+                        if in_tool_call and "</tool_call>" in tool_call_buffer:
+                            tool_call_closed = True
                             tool_call_text = tool_call_buffer.split("</tool_call>", 1)[0]
                             self.manager.request_stop()
                             break
+                        
+                        # Stream regular content (not in thinking or tool_call blocks)
+                        if not in_thinking and thinking_closed and not in_tool_call and not tool_call_closed:
+                            # Extract content after thinking block, before any tool_call
+                            after_thinking = round_buffer
+                            # Remove thinking block
+                            after_thinking = re.sub(r"<think>.*?</think>", "", after_thinking, flags=re.DOTALL | re.IGNORECASE)
+                            after_thinking = re.sub(r"<thinking>.*?</thinking>", "", after_thinking, flags=re.DOTALL | re.IGNORECASE)
+                            # Remove incomplete tool_call tag at end
+                            if "<tool_call>" in after_thinking:
+                                after_thinking = after_thinking.split("<tool_call>")[0]
+                            after_thinking = after_thinking.strip()
+                            
+                            # Stream delta
+                            if len(after_thinking) > len(content_snapshot):
+                                delta = after_thinking[len(content_snapshot):]
+                                content_snapshot = after_thinking
+                                content_buffer = after_thinking
+                                buffer.add_token(delta)
+                                yield create_token_event(delta)
+                        
+                        # If no thinking tag detected after some tokens, start streaming immediately
+                        elif not in_thinking and not thinking_closed and not in_tool_call and len(round_buffer) > 20:
+                            # Check if there's any tag starting
+                            if "<" not in round_buffer[-15:]:
+                                # No tags being built, this is regular content - stream it
+                                content = round_buffer.strip()
+                                if len(content) > len(content_snapshot):
+                                    delta = content[len(content_snapshot):]
+                                    content_snapshot = content
+                                    content_buffer = content
+                                    buffer.add_token(delta)
+                                    yield create_token_event(delta)
 
-
-                    # Extract tool call from streamed planning output
+                    # End of generation for this round
                     print(f"\n=== Tool round {tool_round + 1} ===")
-                    print(f"Model raw output ({len(planning_buffer)} chars):")
-                    print(planning_buffer)
+                    print(f"Model raw output ({len(round_buffer)} chars):")
+                    print(round_buffer)
                     print("=" * 40)
+
+                    if thinking_buffer:
+                        last_planning_thinking = thinking_buffer.strip()
                     
+                    # Check if we got a tool call
                     if tool_call_text:
                         tool_call = self._extract_tool_call(f"<tool_call>{tool_call_text}</tool_call>")
-                        print(f"Extracted from tool_call_text: {tool_call}")
+                        print(f"Extracted tool_call: {tool_call}")
                     else:
-                        tool_call = self._extract_tool_call(planning_buffer)
-                        print(f"Extracted from planning_buffer: {tool_call}")
-                    if not tool_call:
-                        # No tool call: the planning_buffer contains the final answer
-                        # Stream it character by character for smooth display
-                        if planning_buffer.strip():
-                            # Split into chunks for smoother streaming effect
-                            content = planning_buffer
-                            chunk_size = 8  # Characters per chunk
-                            for i in range(0, len(content), chunk_size):
-                                chunk = content[i:i + chunk_size]
-                                buffer.add_token(chunk)
-                                tokens_generated += 1
-                                yield create_token_event(chunk)
+                        tool_call = self._extract_tool_call(round_buffer)
+                        print(f"Extracted from buffer: {tool_call}")
+                    
+                    # No tool call or explicit no_tool = we're done, content already streamed
+                    if not tool_call or tool_call.get("name") == "no_tool":
+                        # If content wasn't streamed yet (e.g., pure tool planning output), stream it now
+                        if not content_buffer:
+                            # Extract any final content from the buffer
+                            final_content = round_buffer
+                            final_content = re.sub(r"<think>.*?</think>", "", final_content, flags=re.DOTALL | re.IGNORECASE)
+                            final_content = re.sub(r"<thinking>.*?</thinking>", "", final_content, flags=re.DOTALL | re.IGNORECASE)
+                            final_content = re.sub(r"<tool_call>.*?</tool_call>", "", final_content, flags=re.DOTALL | re.IGNORECASE)
+                            final_content = final_content.strip()
+                            
+                            if final_content:
+                                buffer.add_token(round_buffer)  # Store raw for thinking extraction
+                                for char in final_content:
+                                    yield create_token_event(char)
                         break
 
                     tool_name = tool_call.get("name")
                     tool_args = tool_call.get("arguments", {})
 
+                    # Check if tool is enabled
                     if tool_name not in enabled_tools:
-                        # Tool not enabled: stream the planning_buffer content
-                        if planning_buffer.strip():
-                            content = planning_buffer
-                            chunk_size = 8
-                            for i in range(0, len(content), chunk_size):
-                                chunk = content[i:i + chunk_size]
-                                buffer.add_token(chunk)
-                                tokens_generated += 1
-                                yield create_token_event(chunk)
+                        self.logger.warning(f"Tool {tool_name} not in enabled_tools: {enabled_tools}")
+                        # Tool not enabled - just continue without executing (already streamed content if any)
                         break
 
                     # Record tool call for storage
@@ -497,7 +557,7 @@ class ChatService:
                         "name": tool_name,
                         "arguments": tool_args,
                         "round": tool_round + 1,
-                        "thinking": planning_thinking.strip() if planning_thinking else None
+                        "thinking": thinking_buffer.strip() if thinking_buffer else None
                     })
 
                     # Yield tool call status to frontend
@@ -534,10 +594,10 @@ class ChatService:
                         "round": tool_round + 1
                     })
 
-                    # Add assistant tool call + tool result to messages
+                    # Add assistant tool call + tool result to messages for next round
                     current_messages.append({
                         "role": "assistant",
-                        "content": tool_call_text or planning_buffer
+                        "content": f"<tool_call>{tool_call_text}</tool_call>" if tool_call_text else round_buffer
                     })
                     current_messages.append({
                         "role": "tool",
@@ -546,7 +606,7 @@ class ChatService:
 
                     tool_round += 1
                 else:
-                    # Max tool rounds hit, stream final answer anyway
+                    # Max tool rounds hit, stream final answer with tool results context
                     final_prompt = self.manager.format_chat_prompt(
                         current_messages,
                         enable_thinking=enable_thinking
@@ -569,6 +629,8 @@ class ChatService:
             
             # Save assistant message with thinking and tool calls stored
             thinking, final_text = self._split_thinking(buffer.content)
+            if not thinking and last_planning_thinking:
+                thinking = last_planning_thinking
             # Remove any tool call tags from the final answer text
             if final_text:
                 final_text = re.sub(r"<tool_call>[\s\S]*?</tool_call>", "", final_text, flags=re.IGNORECASE).strip()

@@ -344,13 +344,6 @@ export default function SettingsView({ onBack }) {
                 checked={settings.ui.compact_mode}
                 onChange={(val) => updateSetting('ui', 'compact_mode', val)}
               />
-
-              <ToggleSetting
-                label="Tool thinking stream"
-                description="Stream planning/thinking while tools are being selected"
-                checked={settings.ui.tool_thinking}
-                onChange={(val) => updateSetting('ui', 'tool_thinking', val)}
-              />
             </div>
           </section>
 
