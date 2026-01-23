@@ -3,6 +3,9 @@ import { useApp } from '../contexts/AppContext'
 import { useToast } from '../contexts/ToastContext'
 import { chatAPI, modelsAPI } from '../lib/api'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
 import { 
   Menu, Send, Square, User, Bot, Sparkles, 
   Code, Lightbulb, Wand2, MessageSquare, Zap, Copy, Check,
@@ -133,9 +136,10 @@ export default function ChatView({ onToggleSidebar }) {
 
     for await (const { event, data } of streamIterator) {
       // Debug: log all events
-      console.log('[SSE Event]', event, data)
+      console.log('[SSE Event]', event, JSON.stringify(data).slice(0, 200))
       
       if (event === 'start') {
+        console.log('[SSE] Start event received')
         conversationId = data.conversation_id
       } else if (event === 'status') {
         if (data?.conversation_id) {
@@ -147,6 +151,7 @@ export default function ChatView({ onToggleSidebar }) {
         }
         // Tool thinking stream - accumulate thinking for next tool call
         if (data?.status === 'tool_thinking_delta' && data?.delta) {
+          console.log('[SSE] Tool thinking delta received:', data.delta.slice(0, 50))
           const round = data.round || 1
           setToolEvents(prev => {
             const updated = [...prev]
@@ -176,6 +181,7 @@ export default function ChatView({ onToggleSidebar }) {
         }
 
         if (data?.status === 'tool_call' && data?.tool) {
+          console.log('[SSE] Tool call received:', data.tool, data.arguments)
           const round = data.round || 1
           setToolEvents(prev => {
             const updated = [...prev]
@@ -202,6 +208,7 @@ export default function ChatView({ onToggleSidebar }) {
         }
 
         if (data?.status === 'tool_result' && data?.tool) {
+          console.log('[SSE] Tool result received:', data.tool, data.result?.slice(0, 100))
           setToolEvents(prev => {
             const updated = [...prev]
             const reverseIndex = [...updated].reverse().findIndex(
@@ -230,9 +237,11 @@ export default function ChatView({ onToggleSidebar }) {
           })
         }
       } else if (event === 'token') {
+        console.log('[SSE] Token received:', (data.token || data.content || '').slice(0, 30))
         fullContent += data.token || data.content || ''
         setStreamingContent(fullContent)
       } else if (event === 'done') {
+        console.log('[SSE] Done event received:', data)
         if (data?.conversation_id) {
           conversationId = data.conversation_id
           setCurrentConversation(prev => {
@@ -246,6 +255,7 @@ export default function ChatView({ onToggleSidebar }) {
         }
         setToolEvents([])
       } else if (event === 'error') {
+        console.log('[SSE] Error event received:', data)
         throw new Error(data.error || 'Generation failed')
       }
     }
@@ -1064,8 +1074,13 @@ function MessageBubble({
                     )}
                   </div>
                 )}
-                <div className="prose prose-invert max-w-none text-xs">
-                  <ReactMarkdown>{answer || ''}</ReactMarkdown>
+                <div className="prose prose-invert max-w-none text-xs prose-li:my-0.5 prose-ul:my-1 prose-ol:my-1 prose-p:my-1.5 prose-headings:my-2">
+                  <ReactMarkdown 
+                    remarkPlugins={[remarkGfm, remarkMath]} 
+                    rehypePlugins={[rehypeKatex]}
+                  >
+                    {answer || ''}
+                  </ReactMarkdown>
                   {isStreaming && (
                     <span className="inline-block w-2 h-5 bg-red-400 animate-pulse ml-0.5 align-middle" />
                   )}

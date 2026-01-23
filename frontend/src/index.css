@@ -1,6 +1,9 @@
 /* Import Montserrat from Google Fonts - must be before @import tailwindcss */
 @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;500;600;700;900&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
+/* KaTeX for LaTeX/Math rendering */
+@import 'katex/dist/katex.min.css';
+
 @import "tailwindcss";
 
 /* Hide scrollbars globally but allow scrolling */

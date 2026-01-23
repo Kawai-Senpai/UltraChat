@@ -463,48 +463,32 @@ class ChatService:
                         tool_call = self._extract_tool_call(planning_buffer)
                         print(f"Extracted from planning_buffer: {tool_call}")
                     if not tool_call:
-                        # No tool call: stream final answer with tools disabled
-                        final_prompt = self.manager.format_chat_prompt(
-                            current_messages,
-                            enable_thinking=enable_thinking
-                        )
-                        prompt_for_metrics = final_prompt
-                        async for token in self.manager.generate(
-                            prompt=final_prompt,
-                            max_new_tokens=gen_options.get('max_new_tokens', 2048),
-                            temperature=gen_options.get('temperature', 0.7),
-                            top_p=gen_options.get('top_p', 0.9),
-                            top_k=gen_options.get('top_k', 50),
-                            repetition_penalty=gen_options.get('repetition_penalty', 1.1),
-                            stream=True,
-                        ):
-                            buffer.add_token(token)
-                            tokens_generated += 1
-                            yield create_token_event(token)
+                        # No tool call: the planning_buffer contains the final answer
+                        # Stream it character by character for smooth display
+                        if planning_buffer.strip():
+                            # Split into chunks for smoother streaming effect
+                            content = planning_buffer
+                            chunk_size = 8  # Characters per chunk
+                            for i in range(0, len(content), chunk_size):
+                                chunk = content[i:i + chunk_size]
+                                buffer.add_token(chunk)
+                                tokens_generated += 1
+                                yield create_token_event(chunk)
                         break
 
                     tool_name = tool_call.get("name")
                     tool_args = tool_call.get("arguments", {})
 
                     if tool_name not in enabled_tools:
-                        # Tool not enabled: stream final answer
-                        final_prompt = self.manager.format_chat_prompt(
-                            current_messages,
-                            enable_thinking=enable_thinking
-                        )
-                        prompt_for_metrics = final_prompt
-                        async for token in self.manager.generate(
-                            prompt=final_prompt,
-                            max_new_tokens=gen_options.get('max_new_tokens', 2048),
-                            temperature=gen_options.get('temperature', 0.7),
-                            top_p=gen_options.get('top_p', 0.9),
-                            top_k=gen_options.get('top_k', 50),
-                            repetition_penalty=gen_options.get('repetition_penalty', 1.1),
-                            stream=True,
-                        ):
-                            buffer.add_token(token)
-                            tokens_generated += 1
-                            yield create_token_event(token)
+                        # Tool not enabled: stream the planning_buffer content
+                        if planning_buffer.strip():
+                            content = planning_buffer
+                            chunk_size = 8
+                            for i in range(0, len(content), chunk_size):
+                                chunk = content[i:i + chunk_size]
+                                buffer.add_token(chunk)
+                                tokens_generated += 1
+                                yield create_token_event(chunk)
                         break
 
                     # Record tool call for storage
