@@ -76,6 +76,7 @@ class UISettings(BaseModel):
     stream_enabled: bool = True
     show_timestamps: bool = True
     compact_mode: bool = False
+    tool_thinking: bool = True
     code_theme: str = "monokai"
 
 

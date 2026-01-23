@@ -98,13 +98,15 @@ class Database:
                 )
             """)
 
-            # Migrate messages table (add thinking/raw_content columns if missing)
+            # Migrate messages table (add thinking/raw_content/tool_calls columns if missing)
             cursor = await db.execute("PRAGMA table_info(messages)")
             cols = [row[1] for row in await cursor.fetchall()]
             if "thinking" not in cols:
                 await db.execute("ALTER TABLE messages ADD COLUMN thinking TEXT")
             if "raw_content" not in cols:
                 await db.execute("ALTER TABLE messages ADD COLUMN raw_content TEXT")
+            if "tool_calls" not in cols:
+                await db.execute("ALTER TABLE messages ADD COLUMN tool_calls TEXT")
             
             # Memory table - scoped to profiles
             await db.execute("""

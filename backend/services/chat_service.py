@@ -98,18 +98,52 @@ class ChatService:
     
     def _extract_tool_call(self, text: str) -> Optional[Dict[str, Any]]:
         """Extract a tool call from model output."""
-        match = self._tool_call_pattern.search(text)
-        if not match:
+        if not text:
             return None
-        
-        try:
-            raw = match.group(1).strip()
-            data = json.loads(raw)
-            if "name" in data and "arguments" in data:
-                return data
-        except (json.JSONDecodeError, TypeError):
-            pass
-        
+
+        # 1) Try explicit <tool_call>...</tool_call>
+        match = self._tool_call_pattern.search(text)
+        if match:
+            try:
+                raw = match.group(1).strip()
+                data = json.loads(raw)
+                if "name" in data and "arguments" in data:
+                    return data
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # 2) Try to find JSON objects in the output
+        json_candidates = re.findall(r"\{[\s\S]*\}", text)
+        for candidate in json_candidates:
+            try:
+                data = json.loads(candidate)
+
+                # OpenAI-style tool_calls
+                if isinstance(data, dict) and "tool_calls" in data:
+                    tool_calls = data.get("tool_calls") or []
+                    if tool_calls:
+                        first = tool_calls[0]
+                        if "function" in first:
+                            fn = first.get("function", {})
+                            name = fn.get("name")
+                            args = fn.get("arguments")
+                            if isinstance(args, str):
+                                try:
+                                    args = json.loads(args)
+                                except json.JSONDecodeError:
+                                    args = {"raw": args}
+                            if name:
+                                return {"name": name, "arguments": args or {}}
+                        if "name" in first and "arguments" in first:
+                            return {"name": first.get("name"), "arguments": first.get("arguments") or {}}
+
+                # Direct {name, arguments}
+                if isinstance(data, dict) and "name" in data and "arguments" in data:
+                    return {"name": data.get("name"), "arguments": data.get("arguments") or {}}
+
+            except (json.JSONDecodeError, TypeError):
+                continue
+
         return None
     
     @property
@@ -300,12 +334,13 @@ class ChatService:
             )
             
             # Build messages for API
-            api_messages = await self.build_messages_for_api(
+            base_messages = await self.build_messages_for_api(
                 conversation_id, profile, 
                 include_memory=use_memory,
-                web_search_results=None,  # Tools inject results via agent loop
+                web_search_results=None,  # Tools injected via agent loop
                 profile_id=profile_id or (profile.get('id') if profile else None)
             )
+
             
             # Get generation options
             gen_options = await self.get_generation_options(profile, options)
@@ -313,9 +348,9 @@ class ChatService:
             # Get tool definitions for model if tools enabled
             tool_definitions = self.tool_service.get_tool_definitions(enabled_tools) if enabled_tools else None
             
-            # Format messages for the model with tools
+            # Format messages for the model with tools (planner prompt)
             prompt = self.manager.format_chat_prompt(
-                api_messages,
+                base_messages,
                 enable_thinking=enable_thinking,
                 tools=tool_definitions
             )
@@ -333,16 +368,205 @@ class ChatService:
             tokens_generated = 0
             max_tool_rounds = 3
             tool_round = 0
-            current_prompt = prompt
-            current_messages = api_messages.copy()
-            
-            while True:
-                round_buffer = StreamBuffer()
-                
-                if stream and tool_round == 0 and not enabled_tools:
-                    # No tools: stream directly to user
+            tool_calls_record = []  # Store tool calls for database
+            current_messages = base_messages.copy()
+            prompt_for_metrics = prompt
+
+            if not enabled_tools:
+                # No tools: stream directly to user
+                async for token in self.manager.generate(
+                    prompt=prompt,
+                    max_new_tokens=gen_options.get('max_new_tokens', 2048),
+                    temperature=gen_options.get('temperature', 0.7),
+                    top_p=gen_options.get('top_p', 0.9),
+                    top_k=gen_options.get('top_k', 50),
+                    repetition_penalty=gen_options.get('repetition_penalty', 1.1),
+                    stream=True,
+                ):
+                    buffer.add_token(token)
+                    tokens_generated += 1
+                    yield create_token_event(token)
+            else:
+                # Tool mode: run planning rounds (non-stream) to decide tool calls
+                while tool_round < max_tool_rounds:
+                    planning_prompt = self.manager.format_chat_prompt(
+                        current_messages,
+                        enable_thinking=enable_thinking,
+                        tools=tool_definitions
+                    )
+                    prompt_for_metrics = planning_prompt
+
+                    # Increase max tokens for planning to allow full tool call JSON
+                    planning_max_tokens = min(512, gen_options.get('max_new_tokens', 2048))
+                    planning_buffer = ""
+                    planning_thinking = ""
+                    thinking_snapshot = ""
+                    tool_call_buffer = ""
+                    tool_call_text = None
+                    tool_call_started = False
+                    tool_thinking_enabled = self.settings.get("ui.tool_thinking", True) and enable_thinking is not False
+
+                    self.logger.debug(f"Tool round {tool_round + 1}: Starting planning generation...")
+
                     async for token in self.manager.generate(
-                        prompt=current_prompt,
+                        prompt=planning_prompt,
+                        max_new_tokens=planning_max_tokens,
+                        temperature=0.2,
+                        top_p=min(0.9, gen_options.get('top_p', 0.9)),
+                        top_k=gen_options.get('top_k', 50),
+                        repetition_penalty=gen_options.get('repetition_penalty', 1.1),
+                        stream=True,
+                    ):
+                        planning_buffer += token
+
+                        # Stream thinking deltas until tool call begins
+                        if tool_thinking_enabled and not tool_call_started:
+                            # Only stream thinking content inside <think> tags
+                            think_match = re.search(r"<think>(.*?)(</think>|$)", planning_buffer, re.DOTALL | re.IGNORECASE)
+                            if not think_match:
+                                think_match = re.search(r"<thinking>(.*?)(</thinking>|$)", planning_buffer, re.DOTALL | re.IGNORECASE)
+                            if think_match:
+                                thinking_text = think_match.group(1)
+                                if len(thinking_text) > len(thinking_snapshot):
+                                    delta = thinking_text[len(thinking_snapshot):]
+                                    thinking_snapshot = thinking_text
+                                    planning_thinking += delta
+                                    yield create_status_event("tool_thinking_delta", {
+                                        "delta": delta,
+                                        "round": tool_round + 1
+                                    })
+
+                        # Detect tool call start
+                        if not tool_call_started and "<tool_call>" in planning_buffer:
+                            tool_call_started = True
+                            tool_call_buffer = planning_buffer.split("<tool_call>", 1)[1]
+                        elif tool_call_started:
+                            tool_call_buffer += token
+
+                        # Detect tool call end
+                        if tool_call_started and "</tool_call>" in tool_call_buffer:
+                            tool_call_text = tool_call_buffer.split("</tool_call>", 1)[0]
+                            self.manager.request_stop()
+                            break
+
+
+                    # Extract tool call from streamed planning output
+                    self.logger.debug(f"Tool round {tool_round + 1}: Planning buffer ({len(planning_buffer)} chars): {planning_buffer[:500]}...")
+                    
+                    if tool_call_text:
+                        tool_call = self._extract_tool_call(f"<tool_call>{tool_call_text}</tool_call>")
+                        self.logger.debug(f"Tool round {tool_round + 1}: Extracted from tool_call_text: {tool_call}")
+                    else:
+                        tool_call = self._extract_tool_call(planning_buffer)
+                        self.logger.debug(f"Tool round {tool_round + 1}: Extracted from planning_buffer: {tool_call}")
+                    if not tool_call:
+                        # No tool call: stream final answer with tools disabled
+                        final_prompt = self.manager.format_chat_prompt(
+                            current_messages,
+                            enable_thinking=enable_thinking
+                        )
+                        prompt_for_metrics = final_prompt
+                        async for token in self.manager.generate(
+                            prompt=final_prompt,
+                            max_new_tokens=gen_options.get('max_new_tokens', 2048),
+                            temperature=gen_options.get('temperature', 0.7),
+                            top_p=gen_options.get('top_p', 0.9),
+                            top_k=gen_options.get('top_k', 50),
+                            repetition_penalty=gen_options.get('repetition_penalty', 1.1),
+                            stream=True,
+                        ):
+                            buffer.add_token(token)
+                            tokens_generated += 1
+                            yield create_token_event(token)
+                        break
+
+                    tool_name = tool_call.get("name")
+                    tool_args = tool_call.get("arguments", {})
+
+                    if tool_name not in enabled_tools:
+                        # Tool not enabled: stream final answer
+                        final_prompt = self.manager.format_chat_prompt(
+                            current_messages,
+                            enable_thinking=enable_thinking
+                        )
+                        prompt_for_metrics = final_prompt
+                        async for token in self.manager.generate(
+                            prompt=final_prompt,
+                            max_new_tokens=gen_options.get('max_new_tokens', 2048),
+                            temperature=gen_options.get('temperature', 0.7),
+                            top_p=gen_options.get('top_p', 0.9),
+                            top_k=gen_options.get('top_k', 50),
+                            repetition_penalty=gen_options.get('repetition_penalty', 1.1),
+                            stream=True,
+                        ):
+                            buffer.add_token(token)
+                            tokens_generated += 1
+                            yield create_token_event(token)
+                        break
+
+                    # Record tool call for storage
+                    self.logger.info(f"Tool call detected: {tool_name} with args: {tool_args}")
+                    tool_calls_record.append({
+                        "name": tool_name,
+                        "arguments": tool_args,
+                        "round": tool_round + 1,
+                        "thinking": planning_thinking.strip() if planning_thinking else None
+                    })
+
+                    # Yield tool call status to frontend
+                    self.logger.debug(f"Yielding tool_call event: {tool_name}")
+                    yield create_status_event("tool_call", {
+                        "tool": tool_name,
+                        "arguments": tool_args,
+                        "round": tool_round + 1
+                    })
+
+                    # Execute tool
+                    if tool_name == "web_search":
+                        web_service = get_web_search_service()
+                        if web_service.is_available():
+                            tool_result = await web_service.search_and_format(
+                                tool_args.get("query", ""),
+                                max_results=tool_args.get("max_results", 5)
+                            )
+                        else:
+                            tool_result = "Web search not available"
+                    else:
+                        exec_result = await self.tool_service.execute_tool(tool_name, tool_args)
+                        tool_result = self.tool_service.format_tool_result_for_context(tool_name, exec_result)
+
+                    # Record tool result
+                    tool_calls_record[-1]["result"] = tool_result[:2000] if len(tool_result) > 2000 else tool_result
+                    self.logger.info(f"Tool result: {len(tool_result)} chars")
+
+                    # Yield tool result status
+                    self.logger.debug(f"Yielding tool_result event: {tool_name}")
+                    yield create_status_event("tool_result", {
+                        "tool": tool_name,
+                        "result": tool_result[:1000] if len(tool_result) > 1000 else tool_result,
+                        "round": tool_round + 1
+                    })
+
+                    # Add assistant tool call + tool result to messages
+                    current_messages.append({
+                        "role": "assistant",
+                        "content": tool_call_text or planning_buffer
+                    })
+                    current_messages.append({
+                        "role": "tool",
+                        "content": tool_result
+                    })
+
+                    tool_round += 1
+                else:
+                    # Max tool rounds hit, stream final answer anyway
+                    final_prompt = self.manager.format_chat_prompt(
+                        current_messages,
+                        enable_thinking=enable_thinking
+                    )
+                    prompt_for_metrics = final_prompt
+                    async for token in self.manager.generate(
+                        prompt=final_prompt,
                         max_new_tokens=gen_options.get('max_new_tokens', 2048),
                         temperature=gen_options.get('temperature', 0.7),
                         top_p=gen_options.get('top_p', 0.9),
@@ -350,106 +574,28 @@ class ChatService:
                         repetition_penalty=gen_options.get('repetition_penalty', 1.1),
                         stream=True,
                     ):
-                        round_buffer.add_token(token)
                         buffer.add_token(token)
                         tokens_generated += 1
                         yield create_token_event(token)
-                    break  # No agent loop needed
-                else:
-                    # Tool mode or subsequent rounds: generate complete to check for tool calls
-                    result = await self.manager.generate_complete(
-                        prompt=current_prompt,
-                        max_new_tokens=gen_options.get('max_new_tokens', 2048),
-                        temperature=gen_options.get('temperature', 0.7),
-                        top_p=gen_options.get('top_p', 0.9),
-                        top_k=gen_options.get('top_k', 50),
-                        repetition_penalty=gen_options.get('repetition_penalty', 1.1),
-                    )
-                    round_buffer.add_token(result.text)
-                    tokens_generated += result.tokens_generated
-                
-                # Check for tool call in output
-                if not enabled_tools or tool_round >= max_tool_rounds:
-                    # No tools or max rounds reached - finalize
-                    buffer.add_token(round_buffer.content)
-                    yield create_token_event(round_buffer.content)
-                    break
-                
-                tool_call = self._extract_tool_call(round_buffer.content)
-                if not tool_call:
-                    # No tool call - finalize
-                    buffer.add_token(round_buffer.content)
-                    yield create_token_event(round_buffer.content)
-                    break
-                
-                tool_name = tool_call.get("name")
-                tool_args = tool_call.get("arguments", {})
-                
-                if tool_name not in enabled_tools:
-                    # Tool not enabled - finalize
-                    buffer.add_token(round_buffer.content)
-                    yield create_token_event(round_buffer.content)
-                    break
-                
-                # Yield tool call status to frontend
-                yield create_status_event("tool_call", {
-                    "tool": tool_name,
-                    "arguments": tool_args,
-                    "round": tool_round + 1
-                })
-                
-                # Execute tool
-                if tool_name == "web_search":
-                    web_service = get_web_search_service()
-                    if web_service.is_available():
-                        tool_result = await web_service.search_and_format(
-                            tool_args.get("query", ""),
-                            max_results=tool_args.get("max_results", 5)
-                        )
-                    else:
-                        tool_result = "Web search not available"
-                else:
-                    result = await self.tool_service.execute_tool(tool_name, tool_args)
-                    tool_result = self.tool_service.format_tool_result_for_context(tool_name, result)
-                
-                # Yield tool result status
-                yield create_status_event("tool_result", {
-                    "tool": tool_name,
-                    "result_preview": tool_result[:200] if len(tool_result) > 200 else tool_result
-                })
-                
-                # Add assistant tool call + tool result to messages
-                current_messages.append({
-                    "role": "assistant",
-                    "content": round_buffer.content
-                })
-                current_messages.append({
-                    "role": "tool",
-                    "content": tool_result
-                })
-                
-                # Re-format prompt with tool result
-                current_prompt = self.manager.format_chat_prompt(
-                    current_messages,
-                    enable_thinking=enable_thinking,
-                    tools=tool_definitions
-                )
-                
-                tool_round += 1
             # Calculate timing
             duration_ms = int((time.time() - start_time) * 1000)
             
-            # Save assistant message with thinking stored separately
+            # Save assistant message with thinking and tool calls stored
             thinking, final_text = self._split_thinking(buffer.content)
+            # Remove any tool call tags from the final answer text
+            if final_text:
+                final_text = re.sub(r"<tool_call>[\s\S]*?</tool_call>", "", final_text, flags=re.IGNORECASE).strip()
+            tool_calls_json = json.dumps(tool_calls_record) if tool_calls_record else None
             assistant_msg = await MessageModel.create(
                 conversation_id=conversation_id,
                 role="assistant",
                 content=final_text or buffer.content,
                 thinking=thinking or None,
                 raw_content=buffer.content,
+                tool_calls=tool_calls_json,
                 parent_id=user_msg['id'],
                 model=use_model,
-                tokens_prompt=len(prompt) // 4,  # Rough estimate
+                tokens_prompt=len(prompt_for_metrics) // 4,  # Rough estimate
                 tokens_completion=tokens_generated,
                 duration_ms=duration_ms
             )

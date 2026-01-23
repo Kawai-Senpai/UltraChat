@@ -22,6 +22,7 @@ export default function SettingsView({ onBack }) {
       stream_enabled: true,
       show_timestamps: true,
       compact_mode: false,
+      tool_thinking: true,
     },
   })
   const [storagePath, setStoragePath] = useState('')
@@ -59,6 +60,7 @@ export default function SettingsView({ onBack }) {
           stream_enabled: true,
           show_timestamps: true,
           compact_mode: false,
+          tool_thinking: true,
         },
       })
     } catch (error) {
@@ -103,6 +105,7 @@ export default function SettingsView({ onBack }) {
           stream_enabled: true,
           show_timestamps: true,
           compact_mode: false,
+          tool_thinking: true,
         },
       })
       toast.success('Settings reset to defaults')
@@ -340,6 +343,13 @@ export default function SettingsView({ onBack }) {
                 description="Reduce spacing between messages"
                 checked={settings.ui.compact_mode}
                 onChange={(val) => updateSetting('ui', 'compact_mode', val)}
+              />
+
+              <ToggleSetting
+                label="Tool thinking stream"
+                description="Stream planning/thinking while tools are being selected"
+                checked={settings.ui.tool_thinking}
+                onChange={(val) => updateSetting('ui', 'tool_thinking', val)}
               />
             </div>
           </section>

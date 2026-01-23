@@ -125,11 +125,16 @@ export default function ChatView({ onToggleSidebar }) {
     inputRef.current?.focus()
   }, [])
 
+  const [toolEvents, setToolEvents] = useState([])
+
   const processStream = async (streamIterator) => {
     let fullContent = ''
     let conversationId = currentConversation?.id
 
     for await (const { event, data } of streamIterator) {
+      // Debug: log all events
+      console.log('[SSE Event]', event, data)
+      
       if (event === 'start') {
         conversationId = data.conversation_id
       } else if (event === 'status') {
@@ -140,19 +145,89 @@ export default function ChatView({ onToggleSidebar }) {
             return { ...(prev || {}), id: data.conversation_id }
           })
         }
-        // Handle tool call status events
-        if (data?.tool) {
-          const toolName = data.tool
-          const toolArgs = data.arguments
-          if (toolArgs) {
-            toast.info(`🔧 Calling ${toolName}: ${JSON.stringify(toolArgs).slice(0, 50)}...`, { duration: 2000 })
-          } else {
-            toast.info(`🔧 Tool: ${toolName}`, { duration: 1500 })
-          }
+        // Tool thinking stream - accumulate thinking for next tool call
+        if (data?.status === 'tool_thinking_delta' && data?.delta) {
+          const round = data.round || 1
+          setToolEvents(prev => {
+            const updated = [...prev]
+            // Find or create a pending thinking accumulator for this round
+            const reverseIndex = [...updated].reverse().findIndex(
+              (item) => item.type === 'thinking_pending' && item.round === round
+            )
+            if (reverseIndex !== -1) {
+              const targetIndex = updated.length - 1 - reverseIndex
+              updated[targetIndex] = {
+                ...updated[targetIndex],
+                thinking: (updated[targetIndex].thinking || '') + data.delta,
+              }
+              return updated
+            }
+            return [
+              ...updated,
+              {
+                id: `thinking-pending-${round}-${Date.now()}`,
+                type: 'thinking_pending',
+                round,
+                thinking: data.delta,
+                timestamp: Date.now(),
+              }
+            ]
+          })
         }
-        // Handle tool result status
-        if (data?.result_preview) {
-          toast.success(`✅ Tool result received`, { duration: 1500 })
+
+        if (data?.status === 'tool_call' && data?.tool) {
+          const round = data.round || 1
+          setToolEvents(prev => {
+            const updated = [...prev]
+            // Find any pending thinking for this round and attach to the tool call
+            let thinkingContent = ''
+            const thinkingIndex = updated.findIndex(
+              (item) => item.type === 'thinking_pending' && item.round === round
+            )
+            if (thinkingIndex !== -1) {
+              thinkingContent = updated[thinkingIndex].thinking || ''
+              updated.splice(thinkingIndex, 1) // Remove the pending thinking item
+            }
+            updated.push({
+              id: `${data.tool}-${round}-${Date.now()}`,
+              type: 'call',
+              tool: data.tool,
+              arguments: data.arguments || {},
+              thinking: thinkingContent, // Attach thinking to the tool call
+              round,
+              timestamp: Date.now(),
+            })
+            return updated
+          })
+        }
+
+        if (data?.status === 'tool_result' && data?.tool) {
+          setToolEvents(prev => {
+            const updated = [...prev]
+            const reverseIndex = [...updated].reverse().findIndex(
+              (item) => item.type === 'call' && item.tool === data.tool && !item.result
+            )
+            if (reverseIndex !== -1) {
+              const targetIndex = updated.length - 1 - reverseIndex
+              updated[targetIndex] = {
+                ...updated[targetIndex],
+                result: data.result || data.result_preview || '',
+                status: 'complete',
+              }
+              return updated
+            }
+            return [
+              ...updated,
+              {
+                id: `${data.tool}-result-${data.round || 1}-${Date.now()}`,
+                type: 'result',
+                tool: data.tool,
+                result: data.result || data.result_preview || '',
+                round: data.round || 1,
+                timestamp: Date.now(),
+              }
+            ]
+          })
         }
       } else if (event === 'token') {
         fullContent += data.token || data.content || ''
@@ -169,6 +244,7 @@ export default function ChatView({ onToggleSidebar }) {
           await loadConversation(conversationId)
           await loadConversations()
         }
+        setToolEvents([])
       } else if (event === 'error') {
         throw new Error(data.error || 'Generation failed')
       }
@@ -183,6 +259,7 @@ export default function ChatView({ onToggleSidebar }) {
     }
 
     const userMessage = input.trim()
+    setToolEvents([])
     setInput('')
     setIsGenerating(true)
     setStreamingContent('')
@@ -260,6 +337,7 @@ export default function ChatView({ onToggleSidebar }) {
       return
     }
 
+    setToolEvents([])
     setIsGenerating(true)
     setStreamingContent('')
 
@@ -296,6 +374,7 @@ export default function ChatView({ onToggleSidebar }) {
     const parentIndex = index > 0 ? index - 1 : index
     setBranchCutoffIndex(parentIndex >= 0 ? parentIndex : null)
 
+    setToolEvents([])
     setIsGenerating(true)
     setStreamingContent('')
 
@@ -603,8 +682,18 @@ export default function ChatView({ onToggleSidebar }) {
                 onEditSave={handleEditSave}
                 onRegenerate={handleRegenerate}
                 onBranchNavigate={handleBranchNavigate}
+                toolEvents={[]}
               />
             ))}
+            
+            {/* Live Tool Events */}
+            {toolEvents && toolEvents.length > 0 && (
+              <div className="space-y-2">
+                {toolEvents.map((item, index) => (
+                  <ToolEventBubble key={item.id || `${item.tool}-${index}`} item={item} live />
+                ))}
+              </div>
+            )}
             
             {/* Streaming Message */}
             {streamingContent && (
@@ -615,11 +704,12 @@ export default function ChatView({ onToggleSidebar }) {
                   content: streamingContent,
                 }}
                 isStreaming
+                toolEvents={[]}
               />
             )}
             
             {/* Typing indicator when generating starts */}
-            {isGenerating && !streamingContent && (
+            {isGenerating && !streamingContent && (!toolEvents || toolEvents.length === 0) && (
               <div className="flex gap-4">
                 <div className="shrink-0 w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center">
                   <Bot className="w-4 h-4 text-neutral-400" />
@@ -775,25 +865,27 @@ export default function ChatView({ onToggleSidebar }) {
 const parseThinkingContent = (raw = '', explicitThinking = '') => {
   if (!raw && !explicitThinking) return { thinking: '', answer: '' }
 
+  const withoutToolCalls = raw.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '').trim()
+
   if (explicitThinking) {
-    return { thinking: explicitThinking, answer: raw.trim() }
+    return { thinking: explicitThinking, answer: withoutToolCalls }
   }
 
   const blockPattern = /<(think|thinking)>([\s\S]*?)<\/(think|thinking)>/gi
-  const openMatch = raw.match(/<(think|thinking)>/i)
-  const closeMatch = raw.match(/<\/(think|thinking)>/i)
+  const openMatch = withoutToolCalls.match(/<(think|thinking)>/i)
+  const closeMatch = withoutToolCalls.match(/<\/(think|thinking)>/i)
 
   let thinkingChunks = []
-  let answer = raw.replace(blockPattern, (_m, _t1, content) => {
+  let answer = withoutToolCalls.replace(blockPattern, (_m, _t1, content) => {
     thinkingChunks.push(content)
     return ''
   })
 
   if (openMatch && !closeMatch) {
     const openTag = openMatch[0]
-    const start = raw.toLowerCase().indexOf(openTag.toLowerCase())
-    const before = raw.slice(0, start)
-    const after = raw.slice(start + openTag.length)
+    const start = withoutToolCalls.toLowerCase().indexOf(openTag.toLowerCase())
+    const before = withoutToolCalls.slice(0, start)
+    const after = withoutToolCalls.slice(start + openTag.length)
     return {
       thinking: after.trim(),
       answer: before.trim(),
@@ -803,6 +895,17 @@ const parseThinkingContent = (raw = '', explicitThinking = '') => {
   return {
     thinking: thinkingChunks.join('\n\n').trim(),
     answer: answer.trim(),
+  }
+}
+
+const parseToolCalls = (toolCalls) => {
+  if (!toolCalls) return []
+  if (Array.isArray(toolCalls)) return toolCalls
+  try {
+    const parsed = JSON.parse(toolCalls)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
   }
 }
 
@@ -818,6 +921,7 @@ function MessageBubble({
   onEditSave,
   onRegenerate,
   onBranchNavigate,
+  toolEvents,
 }) {
   const isUser = message.role === 'user'
   const [copied, setCopied] = useState(false)
@@ -825,6 +929,26 @@ function MessageBubble({
   const [isBranchLoading, setIsBranchLoading] = useState(false)
   const { thinking, answer } = parseThinkingContent(message.content, message.thinking)
   const [showThinking, setShowThinking] = useState(isStreaming)
+
+  const storedToolCalls = parseToolCalls(message.tool_calls)
+  // Merge thinking into tool calls - don't create separate thinking events
+  const storedToolEvents = storedToolCalls.map((call, index) => {
+    const round = call.round || index + 1
+    return {
+      id: `stored-${call.name}-${round}`,
+      type: 'call',
+      tool: call.name,
+      arguments: call.arguments || {},
+      result: call.result || '',
+      thinking: call.thinking || '', // Attach thinking to the tool call
+      round,
+      status: call.result ? 'complete' : 'running',
+    }
+  })
+  const toolTimelineItems = (toolEvents && toolEvents.length > 0)
+    ? toolEvents
+    : storedToolEvents
+  
   
   useEffect(() => {
     const loadBranches = async () => {
@@ -860,40 +984,50 @@ function MessageBubble({
   }
   
   return (
-    <div className={`flex gap-4 animate-fadeIn ${isUser ? 'flex-row-reverse' : ''}`}>
-      {/* Avatar */}
-      <div className={`
-        shrink-0 w-8 h-8 rounded-lg flex items-center justify-center
-        ${isUser ? 'bg-red-500/20' : 'bg-white/10'}
-      `}>
-        {isUser ? (
-          <User className="w-4 h-4 text-red-400" />
-        ) : (
-          <Bot className="w-4 h-4 text-neutral-400" />
-        )}
-      </div>
+    <div className="space-y-3">
+      {/* Tool calls displayed BEFORE the message bubble */}
+      {!isUser && toolTimelineItems.length > 0 && (
+        <div className="ml-12 space-y-2">
+          {toolTimelineItems.filter(item => item.type === 'call').map((item, index) => (
+            <ToolEventBubble key={item.id || `${item.tool}-${index}`} item={item} />
+          ))}
+        </div>
+      )}
       
-      {/* Content */}
-      <div className={`flex-1 min-w-0 max-w-[85%] ${isUser ? 'flex justify-end' : ''}`}>
-        <div className="relative group">
-          <div className={`
-            inline-block px-4 py-3 rounded-2xl text-xs
-            ${isUser 
-              ? 'bg-red-500 text-white rounded-tr-sm' 
-              : 'bg-white/5 border border-white/10 text-neutral-200 rounded-tl-sm'}
-          `}>
-            {isUser ? (
-              isEditing ? (
-                <div className="space-y-2">
-                  <textarea
-                    value={editContent}
-                    onChange={(e) => setEditContent(e.target.value)}
-                    rows={3}
-                    className="w-full bg-white/5 border border-white/10 rounded-lg p-2 text-xs text-white resize-none
-                               focus:outline-none focus:border-red-500/50"
-                  />
-                  <div className="flex items-center gap-2">
-                    <button
+      <div className={`flex gap-4 animate-fadeIn ${isUser ? 'flex-row-reverse' : ''}`}>
+        {/* Avatar */}
+        <div className={`
+          shrink-0 w-8 h-8 rounded-lg flex items-center justify-center
+          ${isUser ? 'bg-red-500/20' : 'bg-white/10'}
+        `}>
+          {isUser ? (
+            <User className="w-4 h-4 text-red-400" />
+          ) : (
+            <Bot className="w-4 h-4 text-neutral-400" />
+          )}
+        </div>
+        
+        {/* Content */}
+        <div className={`flex-1 min-w-0 max-w-[85%] ${isUser ? 'flex justify-end' : ''}`}>
+          <div className="relative group">
+            <div className={`
+              inline-block px-4 py-3 rounded-2xl text-xs
+              ${isUser 
+                ? 'bg-red-500 text-white rounded-tr-sm' 
+                : 'bg-white/5 border border-white/10 text-neutral-200 rounded-tl-sm'}
+            `}>
+              {isUser ? (
+                isEditing ? (
+                  <div className="space-y-2">
+                    <textarea
+                      value={editContent}
+                      onChange={(e) => setEditContent(e.target.value)}
+                      rows={3}
+                      className="w-full bg-white/5 border border-white/10 rounded-lg p-2 text-xs text-white resize-none
+                                 focus:outline-none focus:border-red-500/50"
+                    />
+                    <div className="flex items-center gap-2">
+                      <button
                       onClick={() => onEditSave(message.id)}
                       title="Save & Regenerate"
                       className="p-2 rounded-md bg-red-500 text-white hover:bg-red-600"
@@ -920,7 +1054,7 @@ function MessageBubble({
                       onClick={() => setShowThinking(prev => !prev)}
                       className="w-full flex items-center justify-between px-3 py-2 text-[10px] text-neutral-400 hover:text-neutral-200"
                     >
-                      <span className="font-medium">Reasoning</span>
+                      <span className="font-medium">Thinking</span>
                       <ChevronDown className={`w-3 h-3 transition-transform ${showThinking ? 'rotate-180' : ''}`} />
                     </button>
                     {showThinking && (
@@ -1001,6 +1135,7 @@ function MessageBubble({
         </div>
       </div>
     </div>
+    </div>
   )
 }
 
@@ -1044,5 +1179,126 @@ function ToolToggleItem({ label, icon: Icon, active, onClick, description }) {
         {active && <Check className="w-3 h-3 text-white" />}
       </div>
     </button>
+  )
+}
+
+const TOOL_ICON_MAP = {
+  web_search: Globe,
+  wikipedia: BookOpen,
+  web_fetch: Link,
+  calculator: Calculator,
+  thinking: Brain,
+}
+
+const getToolSummary = (item) => {
+  const args = item.arguments || {}
+  switch (item.tool) {
+    case 'web_search':
+      return args.query ? `"${args.query}"` : 'Searching...'
+    case 'wikipedia':
+      return args.query ? `"${args.query}"` : 'Searching...'
+    case 'web_fetch':
+      return args.url ? args.url.slice(0, 50) + (args.url.length > 50 ? '...' : '') : 'Fetching...'
+    case 'calculator':
+      return args.expression || 'Calculating...'
+    default:
+      return item.tool
+  }
+}
+
+const TOOL_LABELS = {
+  web_search: 'Web Search',
+  wikipedia: 'Wikipedia',
+  web_fetch: 'Web Fetch',
+  calculator: 'Calculator',
+}
+
+function ToolEventBubble({ item, live = false }) {
+  const [showThinking, setShowThinking] = useState(false)
+  const [showResult, setShowResult] = useState(false)
+  const Icon = TOOL_ICON_MAP[item.tool] || Settings2
+  const hasThinking = Boolean(item.thinking)
+  const hasResult = Boolean(item.result)
+  const isRunning = !hasResult && (item.status === 'running' || live)
+  
+  // Skip rendering standalone thinking items - they'll be attached to tool calls
+  if (item.type === 'thinking' && !item.tool) {
+    return null
+  }
+
+  return (
+    <div className="flex gap-3 animate-fadeIn">
+      {/* Tool Icon */}
+      <div className={`shrink-0 w-7 h-7 rounded-lg flex items-center justify-center ${
+        hasResult ? 'bg-green-500/15' : 'bg-purple-500/15'
+      }`}>
+        {isRunning ? (
+          <Loader2 className="w-3.5 h-3.5 text-purple-400 animate-spin" />
+        ) : (
+          <Icon className={`w-3.5 h-3.5 ${hasResult ? 'text-green-400' : 'text-purple-400'}`} />
+        )}
+      </div>
+      
+      {/* Tool Card */}
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] font-medium text-neutral-200">
+            {TOOL_LABELS[item.tool] || item.tool}
+          </span>
+          {item.round > 1 && (
+            <span className="text-[9px] text-neutral-500 bg-white/5 px-1.5 py-0.5 rounded">
+              #{item.round}
+            </span>
+          )}
+          {isRunning && (
+            <span className="text-[9px] text-purple-400">Running...</span>
+          )}
+          {hasResult && !isRunning && (
+            <span className="text-[9px] text-green-400">✓</span>
+          )}
+        </div>
+        
+        {/* Tool query/expression */}
+        <div className="text-[10px] text-neutral-400 truncate mt-0.5">
+          {getToolSummary(item)}
+        </div>
+        
+        {/* Expandable sections */}
+        <div className="flex items-center gap-3 mt-1.5">
+          {hasThinking && (
+            <button
+              onClick={() => setShowThinking(prev => !prev)}
+              className="flex items-center gap-1 text-[9px] text-purple-300 hover:text-purple-200"
+            >
+              <Lightbulb className="w-3 h-3" />
+              <span>{showThinking ? 'Hide thinking' : 'Show thinking'}</span>
+            </button>
+          )}
+          {hasResult && (
+            <button
+              onClick={() => setShowResult(prev => !prev)}
+              className="flex items-center gap-1 text-[9px] text-green-300 hover:text-green-200"
+            >
+              <ChevronDown className={`w-3 h-3 transition-transform ${showResult ? 'rotate-180' : ''}`} />
+              <span>{showResult ? 'Hide result' : 'Show result'}</span>
+            </button>
+          )}
+        </div>
+        
+        {/* Thinking content */}
+        {hasThinking && showThinking && (
+          <div className="mt-2 p-2 bg-purple-500/10 border border-purple-500/20 rounded-lg text-[10px] text-neutral-300 whitespace-pre-wrap">
+            {item.thinking}
+          </div>
+        )}
+        
+        {/* Result content */}
+        {hasResult && showResult && (
+          <div className="mt-2 p-2 bg-green-500/10 border border-green-500/20 rounded-lg text-[10px] text-neutral-300 whitespace-pre-wrap max-h-60 overflow-auto">
+            {item.result}
+          </div>
+        )}
+      </div>
+    </div>
   )
 }

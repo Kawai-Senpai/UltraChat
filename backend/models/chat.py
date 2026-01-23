@@ -169,6 +169,7 @@ class MessageModel:
         model: Optional[str] = None,
         thinking: Optional[str] = None,
         raw_content: Optional[str] = None,
+        tool_calls: Optional[str] = None,
         tokens_prompt: Optional[int] = None,
         tokens_completion: Optional[int] = None,
         duration_ms: Optional[int] = None
@@ -188,11 +189,11 @@ class MessageModel:
             await conn.execute(
                 """
                 INSERT INTO messages 
-                (id, conversation_id, parent_id, role, content, thinking, raw_content, model, 
+                (id, conversation_id, parent_id, role, content, thinking, raw_content, tool_calls, model, 
                  tokens_prompt, tokens_completion, duration_ms, branch_index, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (msg_id, conversation_id, parent_id, role, content, thinking, raw_content, model,
+                (msg_id, conversation_id, parent_id, role, content, thinking, raw_content, tool_calls, model,
                  tokens_prompt, tokens_completion, duration_ms, branch_index, now)
             )
 

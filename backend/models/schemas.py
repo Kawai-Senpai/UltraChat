@@ -81,6 +81,7 @@ class MessageResponse(MessageBase):
     model: Optional[str] = None
     thinking: Optional[str] = None
     raw_content: Optional[str] = None
+    tool_calls: Optional[str] = None  # JSON string of tool calls performed
     tokens_prompt: Optional[int] = None
     tokens_completion: Optional[int] = None
     duration_ms: Optional[int] = None

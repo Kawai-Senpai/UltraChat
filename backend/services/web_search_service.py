@@ -9,10 +9,16 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
 try:
-    from duckduckgo_search import DDGS
+    # Try the new package name 'ddgs' first
+    from ddgs import DDGS
     HAS_DDGS = True
 except ImportError:
-    HAS_DDGS = False
+    try:
+        # Fallback to old package name
+        from duckduckgo_search import DDGS
+        HAS_DDGS = True
+    except ImportError:
+        HAS_DDGS = False
 
 
 @dataclass
