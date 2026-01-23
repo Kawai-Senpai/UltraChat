@@ -1214,16 +1214,47 @@ const TOOL_LABELS = {
 }
 
 function ToolEventBubble({ item, live = false }) {
-  const [showThinking, setShowThinking] = useState(false)
+  // Only expand thinking by default if still running (live), collapse when complete
+  const [showThinking, setShowThinking] = useState(live)
   const [showResult, setShowResult] = useState(false)
   const Icon = TOOL_ICON_MAP[item.tool] || Settings2
-  const hasThinking = Boolean(item.thinking)
+  const hasThinking = Boolean(item.thinking?.trim())
   const hasResult = Boolean(item.result)
   const isRunning = !hasResult && (item.status === 'running' || live)
+  const isPendingThinking = item.type === 'thinking_pending'
   
-  // Skip rendering standalone thinking items - they'll be attached to tool calls
+  // Collapse thinking when tool completes (has result)
+  useEffect(() => {
+    if (hasResult && showThinking) {
+      setShowThinking(false)
+    }
+  }, [hasResult])
+  
+  // Skip rendering standalone thinking items that aren't pending
   if (item.type === 'thinking' && !item.tool) {
     return null
+  }
+  
+  // For pending thinking, show a special "Thinking..." indicator
+  if (isPendingThinking) {
+    return (
+      <div className="flex gap-3 animate-fadeIn">
+        <div className="shrink-0 w-7 h-7 rounded-lg bg-purple-500/15 flex items-center justify-center">
+          <Lightbulb className="w-3.5 h-3.5 text-purple-400" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] font-medium text-purple-300">Thinking...</span>
+            <Loader2 className="w-3 h-3 text-purple-400 animate-spin" />
+          </div>
+          {item.thinking?.trim() && (
+            <div className="mt-1 p-2 bg-purple-500/10 border border-purple-500/20 rounded-lg text-[10px] text-neutral-300 whitespace-pre-wrap">
+              {item.thinking.trim()}
+            </div>
+          )}
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -1288,7 +1319,7 @@ function ToolEventBubble({ item, live = false }) {
         {/* Thinking content */}
         {hasThinking && showThinking && (
           <div className="mt-2 p-2 bg-purple-500/10 border border-purple-500/20 rounded-lg text-[10px] text-neutral-300 whitespace-pre-wrap">
-            {item.thinking}
+            {item.thinking?.trim()}
           </div>
         )}
         

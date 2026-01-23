@@ -451,14 +451,17 @@ class ChatService:
 
 
                     # Extract tool call from streamed planning output
-                    self.logger.debug(f"Tool round {tool_round + 1}: Planning buffer ({len(planning_buffer)} chars): {planning_buffer[:500]}...")
+                    print(f"\n=== Tool round {tool_round + 1} ===")
+                    print(f"Model raw output ({len(planning_buffer)} chars):")
+                    print(planning_buffer)
+                    print("=" * 40)
                     
                     if tool_call_text:
                         tool_call = self._extract_tool_call(f"<tool_call>{tool_call_text}</tool_call>")
-                        self.logger.debug(f"Tool round {tool_round + 1}: Extracted from tool_call_text: {tool_call}")
+                        print(f"Extracted from tool_call_text: {tool_call}")
                     else:
                         tool_call = self._extract_tool_call(planning_buffer)
-                        self.logger.debug(f"Tool round {tool_round + 1}: Extracted from planning_buffer: {tool_call}")
+                        print(f"Extracted from planning_buffer: {tool_call}")
                     if not tool_call:
                         # No tool call: stream final answer with tools disabled
                         final_prompt = self.manager.format_chat_prompt(
