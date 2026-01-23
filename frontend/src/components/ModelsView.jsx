@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react'
 import { useApp } from '../contexts/AppContext'
 import { useToast } from '../contexts/ToastContext'
-import { modelsAPI } from '../lib/api'
+import { modelsAPI, voiceAPI } from '../lib/api'
 import { 
   ArrowLeft, RefreshCw, Download, Sparkles, Trash2, Search, 
-  Cpu, HardDrive, Zap, Box, Check, X, Loader2, Star, Archive
+  Cpu, HardDrive, Zap, Box, Check, X, Loader2, Star, Archive,
+  Mic, Volume2, Globe
 } from 'lucide-react'
 
 const QUANT_OPTIONS = [
@@ -34,11 +35,64 @@ export default function ModelsView({ onBack }) {
   const [keepCache, setKeepCache] = useState(false)
   const [loadingModel, setLoadingModel] = useState(null)
   const [loadQuantSelections, setLoadQuantSelections] = useState({})
+  
+  // Voice models state
+  const [voiceStatus, setVoiceStatus] = useState(null)
+  const [availableSTTModels, setAvailableSTTModels] = useState([])
+  const [downloadingSTT, setDownloadingSTT] = useState(null)
+  const [sttDownloadProgress, setSTTDownloadProgress] = useState(null)
 
   useEffect(() => {
     loadLocalModels()
     loadSystemStatus()
+    loadVoiceStatus()
   }, [loadLocalModels, loadSystemStatus])
+  
+  const loadVoiceStatus = async () => {
+    try {
+      const status = await voiceAPI.getStatus()
+      setVoiceStatus(status)
+      const available = await voiceAPI.listAvailableSTTModels()
+      setAvailableSTTModels(available.models || [])
+    } catch (error) {
+      console.error('Failed to load voice status:', error)
+    }
+  }
+  
+  const handleDownloadSTT = async (modelName) => {
+    setDownloadingSTT(modelName)
+    setSTTDownloadProgress({ status: 'starting', model_name: modelName })
+    
+    try {
+      for await (const { event, data } of voiceAPI.downloadSTTModel(modelName)) {
+        if (event === 'status' || event === 'progress') {
+          setSTTDownloadProgress(prev => ({ ...prev, ...data }))
+        } else if (event === 'done') {
+          toast.success(`Downloaded ${modelName}`)
+          await loadVoiceStatus()
+        } else if (event === 'error') {
+          throw new Error(data.error || data.message || 'Download failed')
+        }
+      }
+    } catch (error) {
+      toast.error('STT download failed: ' + error.message)
+    } finally {
+      setDownloadingSTT(null)
+      setSTTDownloadProgress(null)
+    }
+  }
+  
+  const handleDeleteSTT = async (modelName) => {
+    if (!confirm(`Delete ${modelName}?`)) return
+    
+    try {
+      await voiceAPI.deleteSTTModel(modelName)
+      toast.success('STT model deleted')
+      await loadVoiceStatus()
+    } catch (error) {
+      toast.error('Failed to delete: ' + error.message)
+    }
+  }
 
   const handleSearch = async () => {
     if (!searchQuery.trim()) return
@@ -574,6 +628,170 @@ export default function ModelsView({ onBack }) {
                 })}
               </div>
             )}
+          </div>
+          
+          {/* Voice Models Section */}
+          <div className="p-5 bg-white/5 border border-white/10 rounded-xl">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-purple-500/20 flex items-center justify-center">
+                  <Mic className="w-5 h-5 text-purple-400" />
+                </div>
+                <div>
+                  <h3 className="text-xs font-black text-white">Voice Models</h3>
+                  <p className="text-[10px] text-neutral-500">TTS and STT models for voice chat</p>
+                </div>
+              </div>
+              <button
+                onClick={loadVoiceStatus}
+                className="p-2 rounded-lg hover:bg-white/10 text-neutral-400 transition-colors"
+                title="Refresh"
+              >
+                <RefreshCw className="w-4 h-4" />
+              </button>
+            </div>
+            
+            {/* Voice Status */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+              <div className="p-3 bg-neutral-900/50 rounded-lg">
+                <div className="flex items-center gap-2 mb-1">
+                  <Volume2 className="w-3.5 h-3.5 text-neutral-500" />
+                  <span className="text-[10px] text-neutral-500 uppercase tracking-wide">TTS (Chatterbox)</span>
+                </div>
+                <div className="text-xs text-white">
+                  {voiceStatus?.tts_available ? (
+                    voiceStatus?.tts_loaded ? (
+                      <span className="text-green-400">Loaded ({voiceStatus.tts_device})</span>
+                    ) : (
+                      <span className="text-yellow-400">Available (not loaded)</span>
+                    )
+                  ) : (
+                    <span className="text-red-400">Not installed</span>
+                  )}
+                </div>
+                {!voiceStatus?.tts_available && (
+                  <p className="text-[10px] text-neutral-500 mt-1">
+                    Run: pip install chatterbox-tts
+                  </p>
+                )}
+              </div>
+              
+              <div className="p-3 bg-neutral-900/50 rounded-lg">
+                <div className="flex items-center gap-2 mb-1">
+                  <Mic className="w-3.5 h-3.5 text-neutral-500" />
+                  <span className="text-[10px] text-neutral-500 uppercase tracking-wide">STT (Vosk)</span>
+                </div>
+                <div className="text-xs text-white">
+                  {voiceStatus?.stt_available ? (
+                    voiceStatus?.stt_loaded ? (
+                      <span className="text-green-400">Loaded</span>
+                    ) : (
+                      <span className="text-yellow-400">Available (not loaded)</span>
+                    )
+                  ) : (
+                    <span className="text-red-400">Not installed</span>
+                  )}
+                </div>
+                {!voiceStatus?.stt_available && (
+                  <p className="text-[10px] text-neutral-500 mt-1">
+                    Run: pip install vosk
+                  </p>
+                )}
+              </div>
+            </div>
+            
+            {/* STT Models */}
+            <div className="border-t border-white/5 pt-4">
+              <h4 className="text-[10px] text-neutral-500 uppercase tracking-wide mb-3">
+                STT Models ({voiceStatus?.stt_models?.length || 0} downloaded)
+              </h4>
+              
+              {/* Downloaded STT Models */}
+              {voiceStatus?.stt_models?.length > 0 && (
+                <div className="space-y-2 mb-4">
+                  {voiceStatus.stt_models.map(model => (
+                    <div
+                      key={model.name}
+                      className="flex items-center justify-between p-3 bg-neutral-900/50 rounded-lg"
+                    >
+                      <div className="flex items-center gap-2">
+                        <Globe className="w-4 h-4 text-purple-400" />
+                        <span className="text-xs text-white">{model.name}</span>
+                        <span className="text-[10px] text-neutral-500">
+                          {formatSize(model.size)}
+                        </span>
+                      </div>
+                      <button
+                        onClick={() => handleDeleteSTT(model.name)}
+                        className="p-1.5 rounded hover:bg-red-500/20 text-neutral-500 hover:text-red-400"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              
+              {/* Available STT Models to Download */}
+              <h4 className="text-[10px] text-neutral-500 uppercase tracking-wide mb-2">
+                Available for Download
+              </h4>
+              <div className="space-y-2">
+                {availableSTTModels.map(model => (
+                  <div
+                    key={model.name}
+                    className="flex items-center justify-between p-3 bg-neutral-900/30 rounded-lg"
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <Globe className="w-4 h-4 text-neutral-500" />
+                        <span className="text-xs text-white">{model.name}</span>
+                        {model.installed && (
+                          <span className="text-[10px] text-green-400 flex items-center gap-1">
+                            <Check className="w-3 h-3" /> Installed
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-3 mt-1 ml-6 text-[10px] text-neutral-500">
+                        <span>{model.language}</span>
+                        <span>~{model.size_mb} MB</span>
+                      </div>
+                      <p className="text-[10px] text-neutral-600 ml-6 mt-0.5">{model.description}</p>
+                    </div>
+                    
+                    {!model.installed && (
+                      <button
+                        onClick={() => handleDownloadSTT(model.name)}
+                        disabled={downloadingSTT !== null}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-500/20 hover:bg-purple-500/30
+                                   text-purple-400 text-xs font-medium rounded-lg transition-colors
+                                   disabled:opacity-50"
+                      >
+                        {downloadingSTT === model.name ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Download className="w-3.5 h-3.5" />
+                        )}
+                        {downloadingSTT === model.name ? 'Downloading...' : 'Download'}
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+              
+              {/* STT Download Progress */}
+              {sttDownloadProgress && (
+                <div className="mt-3 p-3 bg-neutral-900/50 border border-purple-500/20 rounded-lg animate-fadeIn">
+                  <div className="flex items-center gap-2 text-xs text-purple-400">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Downloading {sttDownloadProgress.model_name}...</span>
+                  </div>
+                  {sttDownloadProgress.message && (
+                    <p className="text-[10px] text-neutral-500 mt-1">{sttDownloadProgress.message}</p>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>

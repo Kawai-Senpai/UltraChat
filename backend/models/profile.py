@@ -25,7 +25,13 @@ class ProfileModel:
         max_tokens: int = 4096,
         context_length: int = 8192,
         model: Optional[str] = None,
-        is_default: bool = False
+        is_default: bool = False,
+        voice_enabled: bool = False,
+        voice_id: Optional[str] = None,
+        stt_model: Optional[str] = None,
+        last_mode: str = "chat",
+        tools_enabled: Optional[str] = None,
+        web_search_enabled: bool = False
     ) -> Dict[str, Any]:
         """Create a new profile."""
         db = get_database()
@@ -41,12 +47,17 @@ class ProfileModel:
                 """
                 INSERT INTO profiles 
                 (id, name, description, system_prompt, temperature, top_p, top_k,
-                 max_tokens, context_length, model, is_default, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 max_tokens, context_length, model, is_default, 
+                 voice_enabled, voice_id, stt_model, last_mode, tools_enabled, web_search_enabled,
+                 created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (profile_id, name, description, system_prompt, temperature,
                  top_p, top_k, max_tokens, context_length, model,
-                 1 if is_default else 0, now, now)
+                 1 if is_default else 0, 
+                 1 if voice_enabled else 0, voice_id, stt_model, last_mode, tools_enabled,
+                 1 if web_search_enabled else 0,
+                 now, now)
             )
             await conn.commit()
         
@@ -114,7 +125,8 @@ class ProfileModel:
         
         allowed_fields = [
             'name', 'description', 'system_prompt', 'temperature',
-            'top_p', 'top_k', 'max_tokens', 'context_length', 'model', 'is_default'
+            'top_p', 'top_k', 'max_tokens', 'context_length', 'model', 'is_default',
+            'voice_enabled', 'voice_id', 'stt_model', 'last_mode', 'tools_enabled', 'web_search_enabled'
         ]
         updates = []
         values = []
@@ -122,7 +134,7 @@ class ProfileModel:
         for field in allowed_fields:
             if field in kwargs and kwargs[field] is not None:
                 updates.append(f"{field} = ?")
-                if field == 'is_default':
+                if field in ('is_default', 'voice_enabled', 'web_search_enabled'):
                     values.append(1 if kwargs[field] else 0)
                 else:
                     values.append(kwargs[field])

@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react'
 import { useToast } from '../contexts/ToastContext'
-import { settingsAPI, modelsAPI } from '../lib/api'
+import { settingsAPI, modelsAPI, voiceAPI } from '../lib/api'
 import { useApp } from '../contexts/AppContext'
 import { 
   ArrowLeft, Save, RotateCcw, Settings, Sliders, Monitor, 
-  Database, Info, Box, Thermometer, FileText, User, Zap
+  Database, Info, Box, Thermometer, FileText, User, Zap,
+  Mic, Volume2, Upload, Trash2, Check, Download
 } from 'lucide-react'
 
 export default function SettingsView({ onBack }) {
@@ -24,10 +25,24 @@ export default function SettingsView({ onBack }) {
       compact_mode: false,
       tool_thinking: true,
     },
+    voice: {
+      tts_enabled: true,
+      stt_enabled: true,
+      tts_device: 'auto',
+      tts_voice: '',  // Voice ID for TTS
+      vad_aggressiveness: 2,
+      chunk_max_words: 16,
+      chunk_max_wait_s: 0.7,
+      auto_load_tts: false,
+    },
   })
   const [storagePath, setStoragePath] = useState('')
   const [isSaving, setIsSaving] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
+  const [ttsVoices, setTtsVoices] = useState([])  // Available TTS voices
+  const [sttModels, setSttModels] = useState({ installed: [], available: [] })  // STT models
+  const [isDownloadingSTT, setIsDownloadingSTT] = useState(false)
+  const [sttDownloadProgress, setSttDownloadProgress] = useState(null)
 
   useEffect(() => {
     loadData()
@@ -40,9 +55,70 @@ export default function SettingsView({ onBack }) {
         loadSettings(),
         loadLocalModels(),
         loadStoragePaths(),
+        loadTtsVoices(),
+        loadSttModels(),
       ])
     } finally {
       setIsLoading(false)
+    }
+  }
+
+  const loadSttModels = async () => {
+    try {
+      const [installed, available] = await Promise.all([
+        voiceAPI.listSTTModels(),
+        voiceAPI.listAvailableSTTModels(),
+      ])
+      setSttModels({
+        installed: installed.models || [],
+        available: available.models || [],
+      })
+    } catch (error) {
+      console.error('Failed to load STT models:', error)
+    }
+  }
+
+  const downloadSttModel = async (modelName) => {
+    if (isDownloadingSTT) return
+    
+    setIsDownloadingSTT(true)
+    setSttDownloadProgress({ name: modelName, percent: 0, message: 'Starting...' })
+    
+    try {
+      // Stream returns an async iterator
+      for await (const data of voiceAPI.downloadSTTModel(modelName, {})) {
+        if (data.type === 'progress') {
+          setSttDownloadProgress({ name: modelName, percent: data.percent || 0, message: data.message || 'Downloading...' })
+        } else if (data.type === 'done') {
+          toast.success(`Downloaded ${modelName}`)
+          await loadSttModels()
+          break
+        } else if (data.type === 'error') {
+          toast.error(data.message || 'Download failed')
+          break
+        }
+      }
+    } catch (error) {
+      console.error('STT download error:', error)
+      toast.error(`Download failed: ${error.message}`)
+    } finally {
+      setIsDownloadingSTT(false)
+      setSttDownloadProgress(null)
+    }
+  }
+
+  const loadTtsVoices = async () => {
+    try {
+      const data = await voiceAPI.listVoices()
+      setTtsVoices(data.voices || [])
+      // Also register system voices if none exist
+      if (!data.voices?.length) {
+        await voiceAPI.registerSystemVoices()
+        const refreshed = await voiceAPI.listVoices()
+        setTtsVoices(refreshed.voices || [])
+      }
+    } catch (error) {
+      console.error('Failed to load TTS voices:', error)
     }
   }
 
@@ -61,6 +137,16 @@ export default function SettingsView({ onBack }) {
           show_timestamps: true,
           compact_mode: false,
           tool_thinking: true,
+        },
+        voice: data.voice || {
+          tts_enabled: true,
+          stt_enabled: true,
+          tts_device: 'auto',
+          tts_voice: '',
+          vad_aggressiveness: 2,
+          chunk_max_words: 16,
+          chunk_max_wait_s: 0.7,
+          auto_load_tts: false,
         },
       })
     } catch (error) {
@@ -106,6 +192,16 @@ export default function SettingsView({ onBack }) {
           show_timestamps: true,
           compact_mode: false,
           tool_thinking: true,
+        },
+        voice: data.voice || {
+          tts_enabled: true,
+          stt_enabled: true,
+          tts_device: 'auto',
+          tts_voice: '',
+          vad_aggressiveness: 2,
+          chunk_max_words: 16,
+          chunk_max_wait_s: 0.7,
+          auto_load_tts: false,
         },
       })
       toast.success('Settings reset to defaults')
@@ -377,6 +473,208 @@ export default function SettingsView({ onBack }) {
                 checked={settings.ui.compact_mode}
                 onChange={(val) => updateSetting('ui', 'compact_mode', val)}
               />
+            </div>
+          </section>
+
+          {/* Voice Settings */}
+          <section className="p-5 bg-white/5 border border-white/10 rounded-xl">
+            <div className="flex items-center gap-3 mb-5">
+              <div className="w-10 h-10 rounded-xl bg-purple-500/20 flex items-center justify-center">
+                <Mic className="w-5 h-5 text-purple-400" />
+              </div>
+              <div>
+                <h3 className="text-xs font-black text-white">Voice Chat</h3>
+                <p className="text-[10px] text-neutral-500">TTS and STT configuration</p>
+              </div>
+            </div>
+            
+            <div className="space-y-4">
+              {/* Enable toggles */}
+              <div className="space-y-3">
+                <ToggleSetting
+                  label="Enable TTS"
+                  description="Text-to-speech for AI responses"
+                  checked={settings.voice?.tts_enabled ?? true}
+                  onChange={(val) => updateSetting('voice', 'tts_enabled', val)}
+                />
+                
+                <ToggleSetting
+                  label="Enable STT"
+                  description="Speech-to-text for voice input"
+                  checked={settings.voice?.stt_enabled ?? true}
+                  onChange={(val) => updateSetting('voice', 'stt_enabled', val)}
+                />
+                
+                <ToggleSetting
+                  label="Auto-load TTS on startup"
+                  description="Load TTS model when backend starts"
+                  checked={settings.voice?.auto_load_tts ?? false}
+                  onChange={(val) => updateSetting('voice', 'auto_load_tts', val)}
+                />
+              </div>
+              
+              {/* TTS Settings */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-3 border-t border-white/5">
+                {/* TTS Voice */}
+                <div>
+                  <div className="flex items-center gap-2 mb-2">
+                    <Volume2 className="w-4 h-4 text-neutral-500" />
+                    <label className="text-xs font-bold text-neutral-300">TTS Voice</label>
+                  </div>
+                  <select
+                    value={settings.voice?.tts_voice ?? ''}
+                    onChange={(e) => updateSetting('voice', 'tts_voice', e.target.value)}
+                    className="w-full px-4 py-2.5 bg-neutral-900 border border-white/10 rounded-lg
+                               text-xs text-white focus:outline-none focus:border-purple-500/50"
+                  >
+                    <option value="">Default (Alba)</option>
+                    {ttsVoices.filter(v => v.is_system).length > 0 && (
+                      <optgroup label="System Voices">
+                        {ttsVoices.filter(v => v.is_system).map(voice => (
+                          <option key={voice.id} value={voice.id}>
+                            {voice.display_name || voice.name}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                    {ttsVoices.filter(v => !v.is_system).length > 0 && (
+                      <optgroup label="Custom Voices">
+                        {ttsVoices.filter(v => !v.is_system).map(voice => (
+                          <option key={voice.id} value={voice.id}>
+                            {voice.display_name || voice.name}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                  </select>
+                  <p className="text-[10px] text-neutral-500 mt-1">Pocket TTS voice for speech synthesis</p>
+                </div>
+                
+                {/* TTS Info */}
+                <div className="flex items-center">
+                  <div className="px-4 py-3 bg-neutral-900/50 rounded-lg border border-white/5 w-full">
+                    <div className="flex items-center gap-2 mb-1">
+                      <Info className="w-3 h-3 text-purple-400" />
+                      <span className="text-[10px] font-medium text-purple-400">Pocket TTS</span>
+                    </div>
+                    <p className="text-[10px] text-neutral-500">
+                      Lightweight TTS that runs on CPU. Fast, low memory usage, supports voice cloning.
+                    </p>
+                  </div>
+                </div>
+              </div>
+              
+              {/* VAD Settings */}
+              <div className="pt-3 border-t border-white/5">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <Mic className="w-4 h-4 text-neutral-500" />
+                    <label className="text-xs font-bold text-neutral-300">VAD Aggressiveness</label>
+                  </div>
+                  <span className="text-xs text-white font-mono px-2 py-0.5 bg-white/10 rounded">
+                    {settings.voice?.vad_aggressiveness ?? 2}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="3"
+                  step="1"
+                  value={settings.voice?.vad_aggressiveness ?? 2}
+                  onChange={(e) => updateSetting('voice', 'vad_aggressiveness', parseInt(e.target.value))}
+                  className="w-full"
+                />
+                <div className="flex justify-between text-[10px] text-neutral-500 mt-1">
+                  <span>Less aggressive (0)</span>
+                  <span>More aggressive (3)</span>
+                </div>
+                <p className="text-[10px] text-neutral-500 mt-1">Higher = filters more non-speech audio</p>
+              </div>
+              
+              {/* STT Model Selection */}
+              <div className="pt-3 border-t border-white/5">
+                <div className="flex items-center gap-2 mb-3">
+                  <Mic className="w-4 h-4 text-neutral-500" />
+                  <label className="text-xs font-bold text-neutral-300">STT Model (Vosk)</label>
+                </div>
+                
+                {/* Installed Models */}
+                {sttModels.installed.length > 0 && (
+                  <div className="mb-3">
+                    <span className="text-[10px] text-neutral-500 uppercase tracking-wide mb-2 block">Installed</span>
+                    <div className="space-y-1">
+                      {sttModels.installed.map(model => (
+                        <div key={model.name} className="flex items-center justify-between px-3 py-2 bg-neutral-900/50 rounded-lg">
+                          <div className="flex items-center gap-2">
+                            <Check className="w-3 h-3 text-green-400" />
+                            <span className="text-xs text-white">{model.name}</span>
+                          </div>
+                          <span className="text-[10px] text-neutral-500">
+                            {(model.size / 1024 / 1024).toFixed(0)}MB
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                
+                {/* Available for Download */}
+                <div>
+                  <span className="text-[10px] text-neutral-500 uppercase tracking-wide mb-2 block">
+                    {sttModels.installed.length > 0 ? 'More Models' : 'Available for Download'}
+                  </span>
+                  <div className="space-y-1 max-h-48 overflow-y-auto">
+                    {sttModels.available
+                      .filter(m => !m.installed)
+                      .map(model => (
+                        <div key={model.name} className="flex items-center justify-between px-3 py-2 bg-neutral-900/50 rounded-lg">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-white truncate">{model.name}</span>
+                              <span className="text-[10px] px-1.5 py-0.5 bg-white/10 rounded text-neutral-400">
+                                {model.language}
+                              </span>
+                            </div>
+                            <p className="text-[10px] text-neutral-500 truncate">{model.description}</p>
+                          </div>
+                          <button
+                            onClick={() => downloadSttModel(model.name)}
+                            disabled={isDownloadingSTT}
+                            className="ml-2 px-3 py-1.5 text-[10px] bg-purple-500/20 text-purple-400 rounded-lg
+                                     hover:bg-purple-500/30 disabled:opacity-50 disabled:cursor-not-allowed
+                                     transition-colors flex items-center gap-1.5 whitespace-nowrap font-medium"
+                          >
+                            {isDownloadingSTT && sttDownloadProgress?.name === model.name ? (
+                              <span>{sttDownloadProgress.percent}%</span>
+                            ) : (
+                              <>
+                                <Download className="w-3 h-3" />
+                                <span>Download ({model.size_mb}MB)</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      ))}
+                  </div>
+                  
+                  {/* Download Progress */}
+                  {sttDownloadProgress && (
+                    <div className="mt-2 px-3 py-2 bg-purple-500/10 rounded-lg border border-purple-500/20">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[10px] text-purple-400">Downloading {sttDownloadProgress.name}</span>
+                        <span className="text-[10px] text-purple-400 font-mono">{sttDownloadProgress.percent}%</span>
+                      </div>
+                      <div className="w-full h-1 bg-purple-500/20 rounded-full overflow-hidden">
+                        <div 
+                          className="h-full bg-purple-500 rounded-full transition-all duration-300"
+                          style={{ width: `${sttDownloadProgress.percent}%` }}
+                        />
+                      </div>
+                      <p className="text-[10px] text-neutral-500 mt-1">{sttDownloadProgress.message}</p>
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           </section>
 

@@ -211,4 +211,68 @@ export const settingsAPI = {
   getStoragePaths: () => api.get('/settings/storage/paths'),
 }
 
+// Voice API
+export const voiceAPI = {
+  getStatus: () => api.get('/voice/status'),
+  loadTTS: (voiceName = null) => {
+    const params = voiceName ? `?voice_name=${encodeURIComponent(voiceName)}` : ''
+    return api.post(`/voice/tts/load${params}`, {})
+  },
+  unloadTTS: () => api.post('/voice/tts/unload', {}),
+  loadSTT: (modelPath = null) => {
+    const params = modelPath ? `?model_path=${encodeURIComponent(modelPath)}` : ''
+    return api.post(`/voice/stt/load${params}`, {})
+  },
+  unloadSTT: () => api.post('/voice/stt/unload', {}),
+  
+  // STT Models
+  listSTTModels: () => api.get('/voice/stt/models'),
+  listAvailableSTTModels: () => api.get('/voice/stt/models/available'),
+  downloadSTTModel: (modelName, options) => api.stream(`/voice/stt/models/download?model_name=${encodeURIComponent(modelName)}`, {}, options),
+  deleteSTTModel: (modelName) => api.delete(`/voice/stt/models/${encodeURIComponent(modelName)}`),
+  
+  // Voice files
+  listVoices: () => api.get('/voice/voices'),
+  listSystemVoices: () => api.get('/voice/voices/system'),
+  listUserVoices: () => api.get('/voice/voices/user'),
+  registerSystemVoices: () => api.post('/voice/voices/register-system', {}),
+  getVoice: (voiceId) => api.get(`/voice/voices/${encodeURIComponent(voiceId)}`),
+  uploadVoice: async (name, description, file) => {
+    const formData = new FormData()
+    formData.append('name', name)
+    if (description) formData.append('description', description)
+    formData.append('file', file)
+    const response = await fetch(`${API_BASE}/voice/voices`, {
+      method: 'POST',
+      body: formData,
+    })
+    if (!response.ok) {
+      const error = await response.json()
+      throw new Error(error.detail || 'Upload failed')
+    }
+    return response.json()
+  },
+  updateVoice: (voiceId, updates) => api.patch(`/voice/voices/${encodeURIComponent(voiceId)}`, updates),
+  deleteVoice: (voiceId) => api.delete(`/voice/voices/${encodeURIComponent(voiceId)}`),
+  setActiveVoice: (voiceId) => api.post(`/voice/voices/${encodeURIComponent(voiceId)}/set`, {}),
+  clearActiveVoice: () => api.post('/voice/voices/clear', {}),
+  
+  // WebSocket helpers
+  createTTSSocket: () => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const host = window.location.host
+    return new WebSocket(`${protocol}//${host}/api/v1/voice/ws/tts`)
+  },
+  createSTTSocket: () => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const host = window.location.host
+    return new WebSocket(`${protocol}//${host}/api/v1/voice/ws/stt`)
+  },
+  createVoiceChatSocket: () => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const host = window.location.host
+    return new WebSocket(`${protocol}//${host}/api/v1/voice/ws/voice-chat`)
+  },
+}
+
 export default api

@@ -10,8 +10,9 @@ import {
   Menu, Send, Square, User, Bot, Sparkles, 
   Code, Lightbulb, Wand2, MessageSquare, Zap, Copy, Check,
   ChevronDown, Loader2, Box, Brain, Globe, Pencil, RotateCcw, ChevronLeft, ChevronRight, X,
-  BookOpen, Link, Calculator, Settings2, Database, Search
+  BookOpen, Link, Calculator, Settings2, Database, Search, Mic
 } from 'lucide-react'
+import VoiceMode from './VoiceMode'
 
 export default function ChatView({ onToggleSidebar }) {
   const { 
@@ -48,6 +49,7 @@ export default function ChatView({ onToggleSidebar }) {
   const [editingMessageId, setEditingMessageId] = useState(null)
   const [editContent, setEditContent] = useState('')
   const [branchCutoffIndex, setBranchCutoffIndex] = useState(null)
+  const [voiceModeActive, setVoiceModeActive] = useState(false)
   const [loadQuantSelections, setLoadQuantSelections] = useState({})
   const messagesEndRef = useRef(null)
   const inputRef = useRef(null)
@@ -777,17 +779,31 @@ export default function ChatView({ onToggleSidebar }) {
                 <Square className="w-4 h-4" fill="currentColor" />
               </button>
             ) : (
-              <button
-                onClick={handleSend}
-                disabled={!input.trim() || !loadedModel}
-                className="flex items-center justify-center w-12 h-12 
-                           bg-red-500 hover:bg-red-600 disabled:bg-neutral-800 disabled:text-neutral-600
-                           text-white rounded-xl transition-all
-                           hover:scale-105 active:scale-95
-                           disabled:cursor-not-allowed disabled:hover:scale-100"
-              >
-                <Send className="w-4 h-4" />
-              </button>
+              <>
+                <button
+                  onClick={() => setVoiceModeActive(true)}
+                  disabled={!loadedModel}
+                  className="flex items-center justify-center w-12 h-12 
+                             bg-white/5 hover:bg-white/10 disabled:bg-neutral-800 disabled:text-neutral-600
+                             text-neutral-400 hover:text-white rounded-xl transition-all
+                             hover:scale-105 active:scale-95
+                             disabled:cursor-not-allowed disabled:hover:scale-100"
+                  title="Voice Mode"
+                >
+                  <Mic className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={handleSend}
+                  disabled={!input.trim() || !loadedModel}
+                  className="flex items-center justify-center w-12 h-12 
+                             bg-red-500 hover:bg-red-600 disabled:bg-neutral-800 disabled:text-neutral-600
+                             text-white rounded-xl transition-all
+                             hover:scale-105 active:scale-95
+                             disabled:cursor-not-allowed disabled:hover:scale-100"
+                >
+                  <Send className="w-4 h-4" />
+                </button>
+              </>
             )}
           </div>
           
@@ -890,6 +906,23 @@ export default function ChatView({ onToggleSidebar }) {
           </div>
         </div>
       </div>
+      
+      {/* Voice Mode Overlay */}
+      <VoiceMode
+        isActive={voiceModeActive}
+        onClose={() => setVoiceModeActive(false)}
+        conversationId={currentConversation?.id}
+        profileId={currentProfile?.id}
+        enableThinking={enableThinking}
+        tools={[
+          useWebSearch && 'web_search',
+          useWikipedia && 'wikipedia',
+          useWebFetch && 'web_fetch',
+          useCalculator && 'calculator',
+          useMemoryStore && 'memory_store',
+          useMemorySearch && 'memory_search',
+        ].filter(Boolean)}
+      />
     </div>
   )
 }

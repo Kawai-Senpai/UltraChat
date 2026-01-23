@@ -29,6 +29,14 @@ from .streaming import (
     StreamBuffer,
 )
 
+from .voice_manager import (
+    VoiceManager,
+    VoiceSettings,
+    TokenChunker,
+    get_voice_manager,
+    close_voice_manager,
+)
+
 __all__ = [
     "HFModelManager",
     "ModelInfo",
@@ -51,4 +59,9 @@ __all__ = [
     "create_progress_event",
     "create_metadata_event",
     "StreamBuffer",
+    "VoiceManager",
+    "VoiceSettings",
+    "TokenChunker",
+    "get_voice_manager",
+    "close_voice_manager",
 ]

@@ -81,6 +81,19 @@ class UISettings(BaseModel):
     code_theme: str = "monokai"
 
 
+class VoiceSettings(BaseModel):
+    """Voice configuration."""
+    tts_enabled: bool = True
+    stt_enabled: bool = True
+    tts_device: str = "auto"  # "auto", "cuda", "cpu"
+    tts_model: str = "turbo"  # "turbo" or "standard"
+    active_voice: Optional[str] = None  # Name of active voice for cloning
+    vad_aggressiveness: int = 2  # 0-3, higher = more aggressive
+    chunk_max_words: int = 16
+    chunk_max_wait_s: float = 0.7
+    auto_load_tts: bool = False  # Auto-load TTS on startup
+
+
 class AppSettings(BaseSettings):
     """Main application settings."""
     app_name: str = "UltraChat"
@@ -94,6 +107,7 @@ class AppSettings(BaseSettings):
     model: ModelSettings = ModelSettings()
     chat_defaults: ChatDefaults = ChatDefaults()
     ui: UISettings = UISettings()
+    voice: VoiceSettings = VoiceSettings()
     
     class Config:
         env_prefix = "ULTRACHAT_"

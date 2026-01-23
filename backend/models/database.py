@@ -108,6 +108,45 @@ class Database:
             if "tool_calls" not in cols:
                 await db.execute("ALTER TABLE messages ADD COLUMN tool_calls TEXT")
             
+            # Migrate profiles table (add voice settings if missing)
+            cursor = await db.execute("PRAGMA table_info(profiles)")
+            profile_cols = [row[1] for row in await cursor.fetchall()]
+            if "voice_enabled" not in profile_cols:
+                await db.execute("ALTER TABLE profiles ADD COLUMN voice_enabled INTEGER DEFAULT 0")
+            if "voice_id" not in profile_cols:
+                await db.execute("ALTER TABLE profiles ADD COLUMN voice_id TEXT")
+            if "stt_model" not in profile_cols:
+                await db.execute("ALTER TABLE profiles ADD COLUMN stt_model TEXT")
+            if "last_mode" not in profile_cols:
+                await db.execute("ALTER TABLE profiles ADD COLUMN last_mode TEXT DEFAULT 'chat'")
+            if "tools_enabled" not in profile_cols:
+                await db.execute("ALTER TABLE profiles ADD COLUMN tools_enabled TEXT")  # JSON array
+            if "web_search_enabled" not in profile_cols:
+                await db.execute("ALTER TABLE profiles ADD COLUMN web_search_enabled INTEGER DEFAULT 0")
+            
+            # Voices table - system and user voices for TTS
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS voices (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    display_name TEXT,
+                    file_path TEXT NOT NULL,
+                    is_system INTEGER DEFAULT 0,
+                    description TEXT,
+                    category TEXT,
+                    sample_rate INTEGER,
+                    duration_seconds REAL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            
+            # Create index for voices
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_voices_system 
+                ON voices(is_system)
+            """)
+            
             # Memory table - scoped to profiles
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS memories (

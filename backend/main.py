@@ -16,13 +16,14 @@ from fastapi.responses import FileResponse
 
 from .config import get_settings, API_PREFIX
 from .models import init_database
-from .core import close_model_manager, get_model_manager
+from .core import close_model_manager, get_model_manager, close_voice_manager
 from .routes import (
     chat_router,
     models_router,
     profiles_router,
     memory_router,
     settings_router,
+    voice_router,
 )
 from .routes.web_search import router as web_search_router
 
@@ -52,6 +53,7 @@ async def lifespan(app: FastAPI):
     # Shutdown
     print("👋 Shutting down UltraChat...")
     await close_model_manager()
+    await close_voice_manager()
 
 
 # Create FastAPI app
@@ -102,6 +104,7 @@ app.include_router(profiles_router, prefix=API_PREFIX)
 app.include_router(memory_router, prefix=API_PREFIX)
 app.include_router(settings_router, prefix=API_PREFIX)
 app.include_router(web_search_router, prefix=API_PREFIX)
+app.include_router(voice_router, prefix=API_PREFIX)
 
 
 # Serve frontend static files

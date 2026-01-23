@@ -7,6 +7,7 @@ from .chat import ConversationModel, MessageModel
 from .profile import ProfileModel
 from .memory import MemoryModel
 from .model_registry import ModelRegistry
+from .voice import VoiceModel
 from .schemas import *
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "ProfileModel",
     "MemoryModel",
     "ModelRegistry",
+    "VoiceModel",
 ]

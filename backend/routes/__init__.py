@@ -7,6 +7,7 @@ from .models import router as models_router
 from .profiles import router as profiles_router
 from .memory import router as memory_router
 from .settings import router as settings_router
+from .voice import router as voice_router
 
 __all__ = [
     "chat_router",
@@ -14,4 +15,5 @@ __all__ = [
     "profiles_router",
     "memory_router",
     "settings_router",
+    "voice_router",
 ]

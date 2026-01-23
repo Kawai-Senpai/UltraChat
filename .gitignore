@@ -30,9 +30,11 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
-# Data directory - user-specific, should not be tracked
-data/
-!data/.gitkeep
+# Data directory - user-specific content should not be tracked
+# But system_voices/ is included in the repo
+data/*
+!data/system_voices/
+data/system_voices/.gitkeep
 
 # Virtual environment
 venv/
