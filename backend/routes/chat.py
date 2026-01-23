@@ -45,7 +45,8 @@ async def send_message(request: ChatRequest):
             options=request.options,
             web_search=request.web_search,
             use_memory=request.use_memory,
-            enable_thinking=request.enable_thinking
+            enable_thinking=request.enable_thinking,
+            tools=request.tools
         ):
             yield event
     

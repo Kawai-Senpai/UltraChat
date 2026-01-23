@@ -6,7 +6,7 @@ File storage management.
 import json
 import os
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 
 from ..config import get_settings_manager
@@ -47,7 +47,7 @@ class StorageManager:
         Returns the path to the exported file.
         """
         exports_dir = self.get_exports_dir()
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         
         # Create filename from conversation title or ID
         title = conversation.get('title', conversation.get('id', 'conversation'))
@@ -137,7 +137,7 @@ class StorageManager:
     ) -> Path:
         """Export all conversations to a single file."""
         exports_dir = self.get_exports_dir()
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         
         filename = f"all_conversations_{timestamp}.{format}"
         filepath = exports_dir / filename
@@ -153,7 +153,7 @@ class StorageManager:
     async def export_memories(self, memories: List[Dict[str, Any]]) -> Path:
         """Export all memories to JSON."""
         exports_dir = self.get_exports_dir()
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         
         filename = f"memories_{timestamp}.json"
         filepath = exports_dir / filename

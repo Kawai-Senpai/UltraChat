@@ -6,7 +6,8 @@ import ReactMarkdown from 'react-markdown'
 import { 
   Menu, Send, Square, User, Bot, Sparkles, 
   Code, Lightbulb, Wand2, MessageSquare, Zap, Copy, Check,
-  ChevronDown, Loader2, Box, Brain, Globe, Pencil, RotateCcw, ChevronLeft, ChevronRight, X
+  ChevronDown, Loader2, Box, Brain, Globe, Pencil, RotateCcw, ChevronLeft, ChevronRight, X,
+  BookOpen, Link, Calculator, Settings2
 } from 'lucide-react'
 
 export default function ChatView({ onToggleSidebar }) {
@@ -34,14 +35,40 @@ export default function ChatView({ onToggleSidebar }) {
   const [loadingModelId, setLoadingModelId] = useState(null)
   const [enableThinking, setEnableThinking] = useState(true)
   const [useWebSearch, setUseWebSearch] = useState(false)
+  const [useWikipedia, setUseWikipedia] = useState(false)
+  const [useWebFetch, setUseWebFetch] = useState(false)
+  const [useCalculator, setUseCalculator] = useState(false)
   const [useMemory, setUseMemory] = useState(true)
+  const [showToolsPanel, setShowToolsPanel] = useState(false)
   const [editingMessageId, setEditingMessageId] = useState(null)
   const [editContent, setEditContent] = useState('')
   const [branchCutoffIndex, setBranchCutoffIndex] = useState(null)
+  const [loadQuantSelections, setLoadQuantSelections] = useState({})
   const messagesEndRef = useRef(null)
   const inputRef = useRef(null)
   const abortControllerRef = useRef(null)
   const dropdownRef = useRef(null)
+
+  const LOAD_QUANT_OPTIONS = [
+    { value: 'original', label: 'Original' },
+    { value: '4bit', label: '4-bit' },
+    { value: '8bit', label: '8-bit' },
+    { value: 'fp16', label: 'FP16' },
+  ]
+
+  const getLoadQuantization = (model) => {
+    const modelKey = getModelKey(model)
+    if (loadQuantSelections[modelKey]) return loadQuantSelections[modelKey]
+    return model.quantization || 'original'
+  }
+
+  const setLoadQuantization = (model, value) => {
+    const modelKey = getModelKey(model)
+    setLoadQuantSelections(prev => ({
+      ...prev,
+      [modelKey]: value,
+    }))
+  }
 
   // Load models on mount
   useEffect(() => {
@@ -75,11 +102,13 @@ export default function ChatView({ onToggleSidebar }) {
   // Handle model loading from dropdown
   const handleLoadModel = async (model) => {
     const modelKey = getModelKey(model)
+    const requestedQuant = getLoadQuantization(model)
+    const loadQuant = requestedQuant === 'original' ? null : requestedQuant
     setLoadingModelId(modelKey)
     setShowModelDropdown(false)
     
     try {
-      const result = await modelsAPI.loadModel(model.model_id, model.quantization)
+      const result = await modelsAPI.loadModel(model.model_id, loadQuant)
       const loadedKey = result?.quantization ? `${result.model_id}__${result.quantization}` : result?.model_id
       setLoadedModel(loadedKey || modelKey)
       toast.success(`Loaded ${result?.model_id || model.model_id} (${result?.quantization || 'original'})`)
@@ -110,6 +139,20 @@ export default function ChatView({ onToggleSidebar }) {
             if (prev?.id === data.conversation_id) return prev
             return { ...(prev || {}), id: data.conversation_id }
           })
+        }
+        // Handle tool call status events
+        if (data?.tool) {
+          const toolName = data.tool
+          const toolArgs = data.arguments
+          if (toolArgs) {
+            toast.info(`🔧 Calling ${toolName}: ${JSON.stringify(toolArgs).slice(0, 50)}...`, { duration: 2000 })
+          } else {
+            toast.info(`🔧 Tool: ${toolName}`, { duration: 1500 })
+          }
+        }
+        // Handle tool result status
+        if (data?.result_preview) {
+          toast.success(`✅ Tool result received`, { duration: 1500 })
         }
       } else if (event === 'token') {
         fullContent += data.token || data.content || ''
@@ -158,6 +201,13 @@ export default function ChatView({ onToggleSidebar }) {
 
       const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null
       
+      // Build enabled tools list
+      const enabledTools = []
+      if (useWebSearch) enabledTools.push('web_search')
+      if (useWikipedia) enabledTools.push('wikipedia')
+      if (useWebFetch) enabledTools.push('web_fetch')
+      if (useCalculator) enabledTools.push('calculator')
+      
       const requestData = {
         message: userMessage,
         conversation_id: currentConversation?.id || null,
@@ -167,6 +217,7 @@ export default function ChatView({ onToggleSidebar }) {
         web_search: useWebSearch,
         use_memory: useMemory,
         enable_thinking: enableThinking,
+        tools: enabledTools.length > 0 ? enabledTools : null,
       }
 
       const streamIterator = chatAPI.sendMessage(requestData, {
@@ -400,33 +451,63 @@ export default function ChatView({ onToggleSidebar }) {
                           return (
                             <div
                               key={modelKey}
-                              onClick={() => {
-                                if (!isLoaded && !isLoading) {
-                                  handleLoadModel(model)
-                                }
-                              }}
-                              className={`flex items-center gap-2 px-3 py-2.5 transition-all select-none ${
+                              className={`px-3 py-2.5 transition-all select-none ${
                                 isLoaded 
-                                  ? 'bg-green-500/10 text-green-400' 
+                                  ? 'bg-green-500/10' 
                                   : isLoading
-                                    ? 'bg-blue-500/10 text-blue-400 cursor-wait'
-                                    : 'hover:bg-white/10 text-neutral-300 active:bg-white/20 cursor-pointer'
+                                    ? 'bg-blue-500/10'
+                                    : 'hover:bg-white/5'
                               }`}
                             >
-                              {isLoading ? (
-                                <Loader2 className="w-4 h-4 animate-spin text-blue-400 shrink-0" />
-                              ) : isLoaded ? (
-                                <Check className="w-4 h-4 text-green-400 shrink-0" />
-                              ) : (
-                                <Box className="w-4 h-4 text-neutral-500 shrink-0" />
-                              )}
-                              <div className="flex-1 min-w-0">
-                                <div className="text-xs font-medium truncate">{shortName}</div>
-                                <div className="flex items-center gap-2 text-[10px] text-neutral-500">
-                                  <span className="px-1 py-0.5 bg-white/5 rounded">{model.quantization || 'original'}</span>
-                                  <span>{model.size_formatted}</span>
+                              <div className="flex items-center gap-2">
+                                {isLoading ? (
+                                  <Loader2 className="w-4 h-4 animate-spin text-blue-400 shrink-0" />
+                                ) : isLoaded ? (
+                                  <Check className="w-4 h-4 text-green-400 shrink-0" />
+                                ) : (
+                                  <Box className="w-4 h-4 text-neutral-500 shrink-0" />
+                                )}
+                                <div className="flex-1 min-w-0">
+                                  <div className={`text-xs font-medium truncate ${isLoaded ? 'text-green-400' : 'text-neutral-300'}`}>{shortName}</div>
+                                  <div className="flex items-center gap-2 text-[10px] text-neutral-500">
+                                    <span className="px-1 py-0.5 bg-white/5 rounded">{model.quantization || 'original'}</span>
+                                    <span>{model.size_formatted}</span>
+                                  </div>
                                 </div>
                               </div>
+                              {!isLoaded && (
+                                <div className="mt-2 flex items-center gap-2 pl-6">
+                                  <select
+                                    value={getLoadQuantization(model)}
+                                    onChange={(e) => {
+                                      e.stopPropagation()
+                                      setLoadQuantization(model, e.target.value)
+                                    }}
+                                    onClick={(e) => e.stopPropagation()}
+                                    disabled={!!model.quantization}
+                                    className="bg-neutral-800 border border-white/10 rounded px-1.5 py-0.5 text-[10px] text-neutral-200
+                                               focus:outline-none focus:border-red-500/50 disabled:opacity-60"
+                                  >
+                                    {(model.quantization ? [
+                                      { value: model.quantization, label: model.quantization }
+                                    ] : LOAD_QUANT_OPTIONS).map(opt => (
+                                      <option key={opt.value} value={opt.value}>
+                                        {opt.label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      if (!isLoading) handleLoadModel(model)
+                                    }}
+                                    disabled={isLoading}
+                                    className="px-2 py-0.5 bg-green-500/20 hover:bg-green-500/30 text-green-400 text-[10px] font-medium rounded transition-colors disabled:opacity-50"
+                                  >
+                                    {isLoading ? 'Loading...' : 'Load'}
+                                  </button>
+                                </div>
+                              )}
                             </div>
                           )
                         })
@@ -616,19 +697,69 @@ export default function ChatView({ onToggleSidebar }) {
                 description="Enable/disable model thinking"
               />
               <TogglePill
-                label="Web Search"
-                icon={Globe}
-                active={useWebSearch}
-                onClick={() => setUseWebSearch(prev => !prev)}
-                description="Search the web for this prompt"
-              />
-              <TogglePill
                 label="Memory"
                 icon={Brain}
                 active={useMemory}
                 onClick={() => setUseMemory(prev => !prev)}
                 description="Use saved memory context"
               />
+              
+              {/* Collapsible Tools Section */}
+              <div className="relative">
+                <button
+                  onClick={() => setShowToolsPanel(prev => !prev)}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-medium transition-all ${
+                    (useWebSearch || useWikipedia || useWebFetch || useCalculator)
+                      ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30'
+                      : 'bg-white/5 text-neutral-400 border border-white/10 hover:bg-white/10'
+                  }`}
+                >
+                  <Settings2 className="w-3 h-3" />
+                  <span>Tools</span>
+                  {(useWebSearch || useWikipedia || useWebFetch || useCalculator) && (
+                    <span className="w-4 h-4 flex items-center justify-center bg-purple-500/30 rounded-full text-[8px]">
+                      {[useWebSearch, useWikipedia, useWebFetch, useCalculator].filter(Boolean).length}
+                    </span>
+                  )}
+                  <ChevronDown className={`w-3 h-3 transition-transform ${showToolsPanel ? 'rotate-180' : ''}`} />
+                </button>
+                
+                {showToolsPanel && (
+                  <div className="absolute bottom-full left-0 mb-2 p-2 bg-neutral-900 border border-white/10 rounded-lg shadow-2xl z-50 min-w-48 animate-fadeIn">
+                    <div className="text-[10px] text-neutral-500 uppercase tracking-wide mb-2 px-1">Agent Tools</div>
+                    <div className="space-y-1">
+                      <ToolToggleItem
+                        label="Web Search"
+                        icon={Globe}
+                        active={useWebSearch}
+                        onClick={() => setUseWebSearch(prev => !prev)}
+                        description="DuckDuckGo search"
+                      />
+                      <ToolToggleItem
+                        label="Wikipedia"
+                        icon={BookOpen}
+                        active={useWikipedia}
+                        onClick={() => setUseWikipedia(prev => !prev)}
+                        description="Wikipedia search"
+                      />
+                      <ToolToggleItem
+                        label="Web Fetch"
+                        icon={Link}
+                        active={useWebFetch}
+                        onClick={() => setUseWebFetch(prev => !prev)}
+                        description="Fetch webpage content"
+                      />
+                      <ToolToggleItem
+                        label="Calculator"
+                        icon={Calculator}
+                        active={useCalculator}
+                        onClick={() => setUseCalculator(prev => !prev)}
+                        description="Math calculations"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
             <p className="text-[10px] text-neutral-600 text-center">
               Press <kbd className="px-1 py-0.5 bg-white/5 rounded text-neutral-500">Enter</kbd> to send, 
@@ -883,6 +1014,35 @@ function TogglePill({ label, icon: Icon, active, onClick, description }) {
     >
       <Icon className="w-3 h-3" />
       {label}
+    </button>
+  )
+}
+
+function ToolToggleItem({ label, icon: Icon, active, onClick, description }) {
+  return (
+    <button
+      onClick={onClick}
+      title={description}
+      className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[10px] font-medium transition-colors text-left ${
+        active 
+          ? 'bg-purple-500/20 text-purple-300' 
+          : 'text-neutral-400 hover:bg-white/5 hover:text-neutral-200'
+      }`}
+    >
+      <div className={`w-5 h-5 rounded flex items-center justify-center ${
+        active ? 'bg-purple-500/30' : 'bg-white/5'
+      }`}>
+        <Icon className="w-3 h-3" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="truncate">{label}</div>
+        <div className="text-[8px] text-neutral-500 truncate">{description}</div>
+      </div>
+      <div className={`w-3 h-3 rounded-sm border transition-colors ${
+        active ? 'bg-purple-500 border-purple-500' : 'border-neutral-600'
+      }`}>
+        {active && <Check className="w-3 h-3 text-white" />}
+      </div>
     </button>
   )
 }

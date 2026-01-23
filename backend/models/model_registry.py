@@ -3,7 +3,7 @@ UltraChat - Model Registry
 Database operations for tracking and managing Ollama models.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
 from .database import get_database
@@ -76,7 +76,7 @@ class ModelRegistry:
     async def record_usage(name: str):
         """Record that a model was used."""
         db = get_database()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         
         async with db.get_connection() as conn:
             await conn.execute(

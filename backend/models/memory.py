@@ -5,7 +5,7 @@ Memories are scoped to profiles.
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
 from .database import get_database
@@ -26,7 +26,7 @@ class MemoryModel:
     ) -> Dict[str, Any]:
         """Create a new memory (optionally scoped to profile)."""
         db = get_database()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         memory_id = str(uuid.uuid4())
         
         async with db.get_connection() as conn:
@@ -160,7 +160,7 @@ class MemoryModel:
             return await MemoryModel.get_by_id(memory_id)
         
         updates.append("updated_at = ?")
-        values.append(datetime.utcnow().isoformat())
+        values.append(datetime.now(timezone.utc).isoformat())
         values.append(memory_id)
         
         async with db.get_connection() as conn:

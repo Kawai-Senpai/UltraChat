@@ -149,6 +149,8 @@ class ChatRequest(BaseModel):
     web_search: bool = False  # Enable web search
     use_memory: bool = True  # Use memory context
     enable_thinking: Optional[bool] = None  # Enable/disable model thinking if supported
+    # Tool toggles
+    tools: Optional[List[str]] = None  # Enabled tool names: ["web_search", "wikipedia", "web_fetch", "calculator"]
 
 
 class ChatResponse(BaseModel):

@@ -4,7 +4,7 @@ Database operations for user profiles.
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
 from .database import get_database
@@ -29,7 +29,7 @@ class ProfileModel:
     ) -> Dict[str, Any]:
         """Create a new profile."""
         db = get_database()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         profile_id = str(uuid.uuid4())
         
         # If this is default, unset other defaults
@@ -131,7 +131,7 @@ class ProfileModel:
             return await ProfileModel.get_by_id(profile_id)
         
         updates.append("updated_at = ?")
-        values.append(datetime.utcnow().isoformat())
+        values.append(datetime.now(timezone.utc).isoformat())
         values.append(profile_id)
         
         async with db.get_connection() as conn:

@@ -4,7 +4,7 @@ Database operations for conversations and messages.
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
 from .database import get_database
@@ -21,7 +21,7 @@ class ConversationModel:
     ) -> Dict[str, Any]:
         """Create a new conversation."""
         db = get_database()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         conv_id = str(uuid.uuid4())
         
         async with db.get_connection() as conn:
@@ -94,7 +94,7 @@ class ConversationModel:
             return await ConversationModel.get_by_id(conv_id)
         
         updates.append("updated_at = ?")
-        values.append(datetime.utcnow().isoformat())
+        values.append(datetime.now(timezone.utc).isoformat())
         values.append(conv_id)
         
         async with db.get_connection() as conn:
@@ -132,7 +132,7 @@ class ConversationModel:
         async with db.get_connection() as conn:
             await conn.execute(
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
-                (datetime.utcnow().isoformat(), conv_id)
+                (datetime.now(timezone.utc).isoformat(), conv_id)
             )
             await conn.commit()
     
@@ -175,7 +175,7 @@ class MessageModel:
     ) -> Dict[str, Any]:
         """Create a new message."""
         db = get_database()
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         msg_id = str(uuid.uuid4())
         
         # Calculate branch index if this is a branch

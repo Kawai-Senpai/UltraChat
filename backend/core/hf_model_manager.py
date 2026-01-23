@@ -25,6 +25,7 @@ os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
 
 import torch
 from transformers import (
+    AutoConfig,
     AutoModelForCausalLM,
     AutoTokenizer,
     BitsAndBytesConfig,
@@ -961,6 +962,38 @@ class HFModelManager:
             # Check for quantization marker (for 4bit/8bit)
             marker_quant = self._get_quantization_from_marker(local_path)
             effective_quant = marker_quant or requested_quant
+
+            # Load config to avoid accidental pre-quantized handling when original is requested
+            config = None
+            try:
+                config = AutoConfig.from_pretrained(
+                    str(local_path),
+                    trust_remote_code=True,
+                )
+                def strip_quantization_config(cfg: AutoConfig) -> None:
+                    """Remove embedded quantization_config to prevent auto-quantizer activation."""
+                    try:
+                        cfg.__dict__.pop("quantization_config", None)
+                    except Exception:
+                        try:
+                            delattr(cfg, "quantization_config")
+                        except Exception:
+                            cfg.quantization_config = None
+
+                if hasattr(config, "quantization_config"):
+                    if requested_quant is None:
+                        logger.warning(
+                            "⚠️ Detected quantization config in model; ignoring for original load."
+                        )
+                        strip_quantization_config(config)
+                    elif requested_quant in ("4bit", "8bit", "fp16"):
+                        logger.info(
+                            "ℹ️ Overriding embedded quantization config for requested load quantization."
+                        )
+                        strip_quantization_config(config)
+            except Exception as config_error:
+                logger.warning(f"⚠️ Could not load config for quantization check: {config_error}")
+                config = None
             
             logger.info(f"📦 Loading tokenizer for {model_id}...")
             
@@ -987,6 +1020,9 @@ class HFModelManager:
                     "torch_dtype": "auto",
                     "low_cpu_mem_usage": True,
                 }
+
+                if config is not None:
+                    kwargs["config"] = config
                 
                 # Use GPU-only device map first, like the working Qwen LoRa code
                 if allow_offload:
