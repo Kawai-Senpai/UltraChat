@@ -347,6 +347,10 @@ class ChatService:
             
             # Get tool definitions for model if tools enabled
             tool_definitions = self.tool_service.get_tool_definitions(enabled_tools) if enabled_tools else None
+
+            # Session KV cache is only safe for non-tool mode (tool loop prompts are ephemeral)
+            use_session_cache = not enabled_tools
+            cache_state = {} if use_session_cache else None
             
             # Format messages for the model with tools (planner prompt)
             prompt = self.manager.format_chat_prompt(
@@ -383,6 +387,9 @@ class ChatService:
                     top_k=gen_options.get('top_k', 50),
                     repetition_penalty=gen_options.get('repetition_penalty', 1.1),
                     stream=True,
+                    cache_key=conversation_id if use_session_cache else None,
+                    cache_state=cache_state,
+                    use_session_cache=use_session_cache,
                 ):
                     buffer.add_token(token)
                     tokens_generated += 1
@@ -648,6 +655,27 @@ class ChatService:
                 tokens_completion=tokens_generated,
                 duration_ms=duration_ms
             )
+
+            # Update session KV cache with final assistant response
+            if use_session_cache and cache_state is not None:
+                try:
+                    history_messages = list(base_messages) + [{
+                        "role": "assistant",
+                        "content": final_text or buffer.content
+                    }]
+                    history_prompt = self.manager.format_chat_prompt(
+                        history_messages,
+                        enable_thinking=enable_thinking,
+                        tools=tool_definitions,
+                        add_generation_prompt=False
+                    )
+                    await self.manager.update_session_kv_cache(
+                        cache_key=conversation_id,
+                        history_prompt=history_prompt,
+                        cache_state=cache_state
+                    )
+                except Exception as cache_error:
+                    self.logger.warning("KV cache update failed: %s", cache_error)
             
             # Update conversation title if first message
             if not conv.get('title'):
@@ -715,6 +743,9 @@ class ChatService:
         if not conv:
             yield create_error_event("Conversation not found", "not_found")
             return
+
+        # Invalidate cache for this conversation (branching will change history)
+        self.manager.clear_kv_cache(conv['id'])
         
         # Send the same message again (will create a new branch)
         async for event in self.send_message(
@@ -763,7 +794,10 @@ class ChatService:
     
     async def delete_conversation(self, conversation_id: str) -> bool:
         """Delete a conversation and all its messages."""
-        return await ConversationModel.delete(conversation_id)
+        success = await ConversationModel.delete(conversation_id)
+        if success:
+            self.manager.clear_kv_cache(conversation_id)
+        return success
     
     async def update_conversation(
         self,
@@ -811,6 +845,9 @@ class ChatService:
         if message['role'] != 'user':
             yield create_error_event("Can only edit user messages", "invalid_request")
             return
+
+        # Invalidate cache for this conversation (edit changes history)
+        self.manager.clear_kv_cache(message['conversation_id'])
         
         # Send the edited message (creates a new branch)
         async for event in self.send_message(
@@ -839,7 +876,14 @@ class ChatService:
     
     async def delete_message(self, message_id: str) -> bool:
         """Delete a message and all its children."""
-        return await MessageModel.delete(message_id)
+        message = await MessageModel.get_by_id(message_id)
+        if not message:
+            return False
+
+        success = await MessageModel.delete(message_id)
+        if success:
+            self.manager.clear_kv_cache(message['conversation_id'])
+        return success
     
     async def stop_generation(self) -> Dict[str, Any]:
         """

@@ -11,9 +11,11 @@ import json
 import gc
 import shutil
 import asyncio
+import time
 import threading
 import logging
 import traceback
+import inspect
 from pathlib import Path
 from typing import Optional, Dict, Any, List, AsyncGenerator, Callable
 from dataclasses import dataclass, field
@@ -140,6 +142,15 @@ class GenerationResult:
     finish_reason: str = "stop"
 
 
+@dataclass
+class KVCacheEntry:
+    """Session-level KV cache entry for a conversation."""
+    prompt_ids: List[int]
+    past_key_values: Any
+    last_used_at: float = field(default_factory=time.time)
+    model_id: Optional[str] = None
+
+
 # ============================================
 # Exceptions
 # ============================================
@@ -254,6 +265,10 @@ class HFModelManager:
         self._executor = ThreadPoolExecutor(max_workers=2)
         self._generation_lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._kv_cache: Dict[str, KVCacheEntry] = {}
+        self._kv_cache_lock = threading.Lock()
+        self._kv_cache_max_entries = 8
+        self._max_prompt_length = 4096
         
         self._init_paths()
     
@@ -1117,6 +1132,7 @@ class HFModelManager:
         
         self._loaded_model_id = None
         self._loaded_quantization = None
+        self.clear_kv_cache()
         
         gc.collect()
         if torch.cuda.is_available():
@@ -1140,6 +1156,208 @@ class HFModelManager:
     def is_model_loaded(self) -> bool:
         """Check if a model is currently loaded."""
         return self._loaded_model is not None
+
+    # ============================================
+    # Session KV Cache
+    # ============================================
+
+    def clear_kv_cache(self, cache_key: Optional[str] = None) -> None:
+        """Clear session KV cache (all or for a single key)."""
+        with self._kv_cache_lock:
+            if cache_key is None:
+                self._kv_cache.clear()
+            else:
+                self._kv_cache.pop(cache_key, None)
+
+    def _get_kv_cache_entry(self, cache_key: Optional[str]) -> Optional[KVCacheEntry]:
+        if not cache_key:
+            return None
+        with self._kv_cache_lock:
+            entry = self._kv_cache.get(cache_key)
+            if entry and entry.model_id != self._loaded_model_id:
+                self._kv_cache.pop(cache_key, None)
+                return None
+            return entry
+
+    def _set_kv_cache_entry(self, cache_key: str, entry: KVCacheEntry) -> None:
+        if not cache_key:
+            return
+        with self._kv_cache_lock:
+            entry.last_used_at = time.time()
+            entry.model_id = self._loaded_model_id
+            self._kv_cache[cache_key] = entry
+            self._evict_kv_cache_if_needed()
+
+    def _evict_kv_cache_if_needed(self) -> None:
+        if len(self._kv_cache) <= self._kv_cache_max_entries:
+            return
+        overflow = len(self._kv_cache) - self._kv_cache_max_entries
+        if overflow <= 0:
+            return
+        # Evict least-recently used entries
+        sorted_items = sorted(self._kv_cache.items(), key=lambda kv: kv[1].last_used_at)
+        for key, _ in sorted_items[:overflow]:
+            self._kv_cache.pop(key, None)
+
+    def _tokenize_prompt(self, prompt: str):
+        return self._loaded_tokenizer(
+            prompt,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=self._max_prompt_length,
+        )
+
+    def _supports_cache_position(self) -> bool:
+        if not self._loaded_model:
+            return False
+        try:
+            return "cache_position" in inspect.signature(self._loaded_model.forward).parameters
+        except Exception:
+            return False
+
+    def _get_past_seq_len(self, past_key_values: Any) -> int:
+        if past_key_values is None:
+            return 0
+        if hasattr(past_key_values, "get_seq_length"):
+            try:
+                return int(past_key_values.get_seq_length())
+            except Exception:
+                return 0
+        if isinstance(past_key_values, (list, tuple)) and past_key_values:
+            layer = past_key_values[0]
+            key = layer[0] if isinstance(layer, (list, tuple)) else layer
+            if hasattr(key, "shape") and key.ndim >= 3:
+                # Heuristic: seq_len dim is usually larger than head_dim
+                return int(key.shape[-2] if key.shape[-2] >= key.shape[-1] else key.shape[-1])
+        return 0
+
+    def _slice_kv_tensor(self, tensor: torch.Tensor, max_len: int) -> torch.Tensor:
+        if tensor is None or not hasattr(tensor, "ndim") or tensor.ndim < 3:
+            return tensor
+        seq_dim = -2 if tensor.shape[-2] >= tensor.shape[-1] else -1
+        slicer = [slice(None)] * tensor.ndim
+        slicer[seq_dim] = slice(0, max_len)
+        return tensor[tuple(slicer)]
+
+    def _trim_past_key_values(self, past_key_values: Any, max_len: int) -> Any:
+        if past_key_values is None or max_len <= 0:
+            return past_key_values
+        if hasattr(past_key_values, "crop"):
+            try:
+                cropped = past_key_values.crop(max_len)
+                return cropped if cropped is not None else past_key_values
+            except Exception:
+                pass
+        if isinstance(past_key_values, (list, tuple)):
+            trimmed = []
+            for layer in past_key_values:
+                if isinstance(layer, (list, tuple)) and len(layer) >= 2:
+                    key, value = layer[0], layer[1]
+                    key = self._slice_kv_tensor(key, max_len)
+                    value = self._slice_kv_tensor(value, max_len)
+                    trimmed.append((key, value, *layer[2:]) if len(layer) > 2 else (key, value))
+                else:
+                    trimmed.append(layer)
+            return type(past_key_values)(trimmed)
+        return past_key_values
+
+    def _prefill_past_from_ids(
+        self,
+        ids: List[int],
+        past_key_values: Any = None,
+    ) -> Any:
+        if not ids:
+            return past_key_values
+        input_ids = torch.tensor([ids], device=self.device)
+        if past_key_values is None:
+            attention_mask = torch.ones_like(input_ids, dtype=torch.long)
+        else:
+            past_len = self._get_past_seq_len(past_key_values)
+            attention_mask = torch.ones(
+                (1, past_len + input_ids.shape[1]),
+                device=self.device,
+                dtype=torch.long,
+            )
+        model_kwargs = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "past_key_values": past_key_values,
+            "use_cache": True,
+        }
+        if past_key_values is not None and self._supports_cache_position():
+            cache_position = torch.arange(
+                past_len,
+                past_len + input_ids.shape[1],
+                device=self.device,
+                dtype=torch.long,
+            )
+            model_kwargs["cache_position"] = cache_position
+
+        outputs = self._loaded_model(**model_kwargs)
+        return outputs.past_key_values
+
+    async def update_session_kv_cache(
+        self,
+        cache_key: str,
+        history_prompt: str,
+        cache_state: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not cache_key or not history_prompt or not self.is_model_loaded:
+            return
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            self._executor,
+            lambda: self._update_session_kv_cache_sync(cache_key, history_prompt, cache_state),
+        )
+
+    def _update_session_kv_cache_sync(
+        self,
+        cache_key: str,
+        history_prompt: str,
+        cache_state: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not cache_key or not history_prompt or not self.is_model_loaded:
+            return
+
+        inputs = self._tokenize_prompt(history_prompt)
+        history_ids = inputs.input_ids[0].tolist()
+        if not history_ids:
+            return
+
+        prompt_ids = cache_state.get("prompt_ids") if cache_state else None
+        prompt_len = len(prompt_ids) if prompt_ids else 0
+        past_from_generate = cache_state.get("past_key_values") if cache_state else None
+
+        with self._generation_lock, torch.inference_mode():
+            # Incremental update when history_prompt extends the generation prompt
+            if prompt_ids and len(history_ids) >= prompt_len and history_ids[:prompt_len] == prompt_ids:
+                past_for_prompt = None
+                if past_from_generate is not None:
+                    past_for_prompt = self._trim_past_key_values(past_from_generate, prompt_len)
+                    if self._get_past_seq_len(past_for_prompt) != prompt_len:
+                        past_for_prompt = None
+                if past_for_prompt is None:
+                    past_for_prompt = self._prefill_past_from_ids(prompt_ids)
+
+                delta_ids = history_ids[prompt_len:]
+                if delta_ids:
+                    past_for_history = self._prefill_past_from_ids(delta_ids, past_for_prompt)
+                else:
+                    past_for_history = past_for_prompt
+
+                self._set_kv_cache_entry(
+                    cache_key,
+                    KVCacheEntry(prompt_ids=history_ids, past_key_values=past_for_history),
+                )
+                return
+
+            # Fallback: rebuild cache from scratch for this history
+            past_full = self._prefill_past_from_ids(history_ids)
+            self._set_kv_cache_entry(
+                cache_key,
+                KVCacheEntry(prompt_ids=history_ids, past_key_values=past_full),
+            )
     
     # ============================================
     # Generation
@@ -1155,6 +1373,9 @@ class HFModelManager:
         repetition_penalty: float = 1.1,
         do_sample: bool = True,
         stream: bool = True,
+        cache_key: Optional[str] = None,
+        cache_state: Optional[Dict[str, Any]] = None,
+        use_session_cache: bool = False,
     ) -> AsyncGenerator[str, None]:
         """
         Generate text with streaming.
@@ -1176,17 +1397,47 @@ class HFModelManager:
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
 
+        cache_entry = self._get_kv_cache_entry(cache_key) if use_session_cache else None
+
         def _worker():
             try:
                 with self._generation_lock, torch.inference_mode():
                     # Tokenize
-                    inputs = self._loaded_tokenizer(
-                        prompt,
-                        return_tensors="pt",
-                        padding=True,
-                        truncation=True,
-                        max_length=4096,
-                    ).to(self.device)
+                    inputs = self._tokenize_prompt(prompt).to(self.device)
+                    prompt_ids = inputs.input_ids[0].tolist()
+
+                    input_ids = inputs.input_ids
+                    attention_mask = inputs.attention_mask
+                    past_key_values = None
+                    cache_hit = False
+                    prefix_len = 0
+
+                    if (
+                        use_session_cache
+                        and cache_entry is not None
+                        and cache_entry.prompt_ids
+                        and prompt_ids[:len(cache_entry.prompt_ids)] == cache_entry.prompt_ids
+                        and cache_entry.past_key_values is not None
+                    ):
+                        prefix_len = len(cache_entry.prompt_ids)
+                        past_len = self._get_past_seq_len(cache_entry.past_key_values)
+                        if past_len == prefix_len and prefix_len < len(prompt_ids):
+                            input_ids = inputs.input_ids[:, prefix_len:]
+                            attention_mask = torch.ones(
+                                (1, len(prompt_ids)),
+                                device=self.device,
+                                dtype=inputs.attention_mask.dtype,
+                            )
+                            past_key_values = cache_entry.past_key_values
+                            cache_hit = input_ids.shape[1] > 0
+                            if cache_hit:
+                                with self._kv_cache_lock:
+                                    cache_entry.last_used_at = time.time()
+
+                    if not cache_hit:
+                        input_ids = inputs.input_ids
+                        attention_mask = inputs.attention_mask
+                        past_key_values = None
 
                     # Create streamer
                     streamer = TextIteratorStreamer(
@@ -1197,8 +1448,8 @@ class HFModelManager:
 
                     # Generation config with static KV cache for faster inference
                     gen_kwargs = {
-                        "input_ids": inputs.input_ids,
-                        "attention_mask": inputs.attention_mask,
+                        "input_ids": input_ids,
+                        "attention_mask": attention_mask,
                         "max_new_tokens": max_new_tokens,
                         "temperature": temperature if do_sample else 1.0,
                         "top_p": top_p if do_sample else 1.0,
@@ -1210,12 +1461,35 @@ class HFModelManager:
                         "pad_token_id": self._loaded_tokenizer.pad_token_id,
                         "eos_token_id": self._loaded_tokenizer.eos_token_id,
                         "stopping_criteria": StoppingCriteriaList([_StopOnEvent(self._stop_event)]),
+                        "return_dict_in_generate": True,
+                        "output_scores": False,
+                        "output_hidden_states": False,
+                        "output_attentions": False,
                     }
 
+                    if past_key_values is not None:
+                        gen_kwargs["past_key_values"] = past_key_values
+                        if self._supports_cache_position():
+                            past_len = self._get_past_seq_len(past_key_values)
+                            cache_position = torch.arange(
+                                past_len,
+                                past_len + input_ids.shape[1],
+                                device=self.device,
+                                dtype=torch.long,
+                            )
+                            gen_kwargs["cache_position"] = cache_position
+
                     # Start generation in background thread
+                    result_container: Dict[str, Any] = {}
+
+                    def _run_generate():
+                        try:
+                            result_container["output"] = self._loaded_model.generate(**gen_kwargs)
+                        except Exception as e:
+                            result_container["error"] = e
+
                     thread = threading.Thread(
-                        target=self._loaded_model.generate,
-                        kwargs=gen_kwargs,
+                        target=_run_generate,
                         daemon=True
                     )
                     thread.start()
@@ -1225,6 +1499,27 @@ class HFModelManager:
                         loop.call_soon_threadsafe(queue.put_nowait, token)
 
                     thread.join()
+
+                    # Save cache state for caller
+                    if cache_state is not None and use_session_cache and cache_key:
+                        output_obj = result_container.get("output")
+                        past_from_generate = None
+                        try:
+                            past_from_generate = getattr(output_obj, "past_key_values", None)
+                        except Exception:
+                            past_from_generate = None
+                        cache_state.update({
+                            "cache_key": cache_key,
+                            "prompt_ids": prompt_ids,
+                            "prompt_len": len(prompt_ids),
+                            "past_key_values": past_from_generate,
+                            "cache_hit": cache_hit,
+                            "prefix_len": prefix_len,
+                        })
+
+                    # Surface generation errors
+                    if "error" in result_container:
+                        raise result_container["error"]
             finally:
                 loop.call_soon_threadsafe(queue.put_nowait, None)
 
@@ -1257,13 +1552,7 @@ class HFModelManager:
             
             with self._generation_lock, torch.inference_mode():
                 # Tokenize
-                inputs = self._loaded_tokenizer(
-                    prompt,
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=4096,
-                ).to(self.device)
+                inputs = self._tokenize_prompt(prompt).to(self.device)
                 
                 prompt_tokens = inputs.input_ids.shape[1]
                 
@@ -1310,7 +1599,8 @@ class HFModelManager:
         messages: List[Dict[str, str]],
         system_prompt: Optional[str] = None,
         enable_thinking: Optional[bool] = None,
-        tools: Optional[list] = None
+        tools: Optional[list] = None,
+        add_generation_prompt: bool = True
     ) -> str:
         """
         Format messages for chat.
@@ -1324,7 +1614,7 @@ class HFModelManager:
             try:
                 kwargs = {
                     "tokenize": False,
-                    "add_generation_prompt": True,
+                    "add_generation_prompt": add_generation_prompt,
                 }
 
                 if enable_thinking is not None:
@@ -1360,7 +1650,8 @@ class HFModelManager:
             content = msg.get("content", "")
             prompt_parts.append(f"{role}: {content}\n")
         
-        prompt_parts.append("Assistant: ")
+        if add_generation_prompt:
+            prompt_parts.append("Assistant: ")
         
         return "".join(prompt_parts)
 
