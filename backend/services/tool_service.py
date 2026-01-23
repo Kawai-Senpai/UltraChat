@@ -1,6 +1,6 @@
 """
 UltraChat - Tool Service
-Provides various agent tools (Wikipedia, Web Fetch, Calculator, etc.)
+Provides various agent tools (Wikipedia, Web Fetch, Calculator, Memory, etc.)
 """
 
 import ast
@@ -10,6 +10,8 @@ import json
 from typing import Optional, Dict, Any, List, Callable
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
+
+from .memory_service import get_memory_service
 
 try:
     import httpx
@@ -70,6 +72,8 @@ class ToolService:
             "wikipedia": HAS_HTTPX,
             "web_fetch": HAS_HTTPX and HAS_TRAFILATURA,
             "calculator": True,  # Pure Python, always available
+            "memory_store": True,  # Always available
+            "memory_search": True,  # Always available
         }
     
     def get_tool_definitions(self, enabled_tools: List[str]) -> List[Dict[str, Any]]:
@@ -154,6 +158,63 @@ class ToolService:
                         "required": ["expression"]
                     }
                 }
+            },
+            "memory_store": {
+                "type": "function",
+                "function": {
+                    "name": "memory_store",
+                    "description": "Store important information in memory for future recall. Use this to save facts, preferences, instructions, or any information the user wants you to remember across conversations.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "content": {
+                                "type": "string",
+                                "description": "The information to store in memory"
+                            },
+                            "category": {
+                                "type": "string",
+                                "description": "Category for the memory (preference, fact, instruction, personal, project, other)",
+                                "enum": ["preference", "fact", "instruction", "personal", "project", "other"],
+                                "default": "other"
+                            },
+                            "importance": {
+                                "type": "integer",
+                                "description": "Importance level 1-10 (higher = more important)",
+                                "minimum": 1,
+                                "maximum": 10,
+                                "default": 5
+                            }
+                        },
+                        "required": ["content"]
+                    }
+                }
+            },
+            "memory_search": {
+                "type": "function",
+                "function": {
+                    "name": "memory_search",
+                    "description": "Search through stored memories to recall information. Use this when you need to remember something the user previously told you.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "Search query to find relevant memories"
+                            },
+                            "category": {
+                                "type": "string",
+                                "description": "Optional category to filter by",
+                                "enum": ["preference", "fact", "instruction", "personal", "project", "other"]
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of memories to return (default 5)",
+                                "default": 5
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                }
             }
         }
         
@@ -173,6 +234,8 @@ class ToolService:
             "wikipedia": self.wikipedia_search,
             "web_fetch": self.web_fetch,
             "calculator": self.calculator,
+            "memory_store": self.memory_store,
+            "memory_search": self.memory_search,
         }
         
         if tool_name not in tool_map:
@@ -215,9 +278,12 @@ class ToolService:
                 # Use Wikipedia REST API
                 search_url = "https://en.wikipedia.org/w/rest.php/v1/search/page"
                 params = {"q": query, "limit": max_results}
+                headers = {
+                    "User-Agent": "UltraChat/1.0 (Local AI Assistant; https://github.com/ultrachat)"
+                }
                 
                 with httpx.Client(timeout=self.timeout) as client:
-                    response = client.get(search_url, params=params)
+                    response = client.get(search_url, params=params, headers=headers)
                     response.raise_for_status()
                     data = response.json()
                     
@@ -379,6 +445,102 @@ class ToolService:
         
         else:
             raise ValueError(f"Unsupported expression type: {type(node).__name__}")
+    
+    # ============================================
+    # Memory Tools
+    # ============================================
+    
+    async def memory_store(
+        self,
+        content: str,
+        category: str = "other",
+        importance: int = 5,
+        profile_id: Optional[str] = None
+    ) -> ToolResult:
+        """Store information in memory for future recall."""
+        try:
+            memory_service = get_memory_service()
+            
+            # Validate category
+            valid_categories = ["preference", "fact", "instruction", "personal", "project", "other"]
+            if category not in valid_categories:
+                category = "other"
+            
+            # Validate importance
+            importance = max(1, min(10, importance))
+            
+            # Create the memory
+            memory = await memory_service.create_memory(
+                content=content,
+                profile_id=profile_id,
+                category=category,
+                importance=importance
+            )
+            
+            return ToolResult(
+                success=True,
+                data={
+                    "id": memory.get("id"),
+                    "message": "Memory stored successfully",
+                    "content": content[:100] + "..." if len(content) > 100 else content,
+                    "category": category,
+                    "importance": importance
+                }
+            )
+        except Exception as e:
+            return ToolResult(
+                success=False,
+                data=None,
+                error=f"Failed to store memory: {str(e)}"
+            )
+    
+    async def memory_search(
+        self,
+        query: str,
+        category: Optional[str] = None,
+        limit: int = 5,
+        profile_id: Optional[str] = None
+    ) -> ToolResult:
+        """Search through stored memories."""
+        try:
+            memory_service = get_memory_service()
+            
+            # Validate limit
+            limit = max(1, min(20, limit))
+            
+            # Search memories
+            memories = await memory_service.search_memories(
+                query=query,
+                profile_id=profile_id,
+                category=category,
+                limit=limit
+            )
+            
+            # Format results
+            results = []
+            for mem in memories:
+                results.append({
+                    "id": mem.get("id"),
+                    "content": mem.get("content"),
+                    "category": mem.get("category"),
+                    "importance": mem.get("importance"),
+                    "created_at": mem.get("created_at")
+                })
+            
+            return ToolResult(
+                success=True,
+                data={
+                    "query": query,
+                    "count": len(results),
+                    "memories": results
+                }
+            )
+        except Exception as e:
+            return ToolResult(
+                success=False,
+                data=None,
+                error=f"Failed to search memories: {str(e)}"
+            )
     
     # ============================================
     # Format Results

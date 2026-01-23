@@ -10,7 +10,7 @@ import {
   Menu, Send, Square, User, Bot, Sparkles, 
   Code, Lightbulb, Wand2, MessageSquare, Zap, Copy, Check,
   ChevronDown, Loader2, Box, Brain, Globe, Pencil, RotateCcw, ChevronLeft, ChevronRight, X,
-  BookOpen, Link, Calculator, Settings2
+  BookOpen, Link, Calculator, Settings2, Database, Search
 } from 'lucide-react'
 
 export default function ChatView({ onToggleSidebar }) {
@@ -41,6 +41,8 @@ export default function ChatView({ onToggleSidebar }) {
   const [useWikipedia, setUseWikipedia] = useState(false)
   const [useWebFetch, setUseWebFetch] = useState(false)
   const [useCalculator, setUseCalculator] = useState(false)
+  const [useMemoryStore, setUseMemoryStore] = useState(false)
+  const [useMemorySearch, setUseMemorySearch] = useState(false)
   const [useMemory, setUseMemory] = useState(true)
   const [showToolsPanel, setShowToolsPanel] = useState(false)
   const [editingMessageId, setEditingMessageId] = useState(null)
@@ -294,6 +296,8 @@ export default function ChatView({ onToggleSidebar }) {
       if (useWikipedia) enabledTools.push('wikipedia')
       if (useWebFetch) enabledTools.push('web_fetch')
       if (useCalculator) enabledTools.push('calculator')
+      if (useMemoryStore) enabledTools.push('memory_store')
+      if (useMemorySearch) enabledTools.push('memory_search')
       
       const requestData = {
         message: userMessage,
@@ -809,16 +813,16 @@ export default function ChatView({ onToggleSidebar }) {
                 <button
                   onClick={() => setShowToolsPanel(prev => !prev)}
                   className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-medium transition-all ${
-                    (useWebSearch || useWikipedia || useWebFetch || useCalculator)
+                    (useWebSearch || useWikipedia || useWebFetch || useCalculator || useMemoryStore || useMemorySearch)
                       ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30'
                       : 'bg-white/5 text-neutral-400 border border-white/10 hover:bg-white/10'
                   }`}
                 >
                   <Settings2 className="w-3 h-3" />
                   <span>Tools</span>
-                  {(useWebSearch || useWikipedia || useWebFetch || useCalculator) && (
+                  {(useWebSearch || useWikipedia || useWebFetch || useCalculator || useMemoryStore || useMemorySearch) && (
                     <span className="w-4 h-4 flex items-center justify-center bg-purple-500/30 rounded-full text-[8px]">
-                      {[useWebSearch, useWikipedia, useWebFetch, useCalculator].filter(Boolean).length}
+                      {[useWebSearch, useWikipedia, useWebFetch, useCalculator, useMemoryStore, useMemorySearch].filter(Boolean).length}
                     </span>
                   )}
                   <ChevronDown className={`w-3 h-3 transition-transform ${showToolsPanel ? 'rotate-180' : ''}`} />
@@ -855,6 +859,24 @@ export default function ChatView({ onToggleSidebar }) {
                         active={useCalculator}
                         onClick={() => setUseCalculator(prev => !prev)}
                         description="Math calculations"
+                      />
+                      
+                      <div className="border-t border-white/5 my-1.5" />
+                      <div className="text-[10px] text-neutral-500 uppercase tracking-wide mb-1 px-1">Memory</div>
+                      
+                      <ToolToggleItem
+                        label="Store Memory"
+                        icon={Database}
+                        active={useMemoryStore}
+                        onClick={() => setUseMemoryStore(prev => !prev)}
+                        description="Save to long-term memory"
+                      />
+                      <ToolToggleItem
+                        label="Search Memory"
+                        icon={Search}
+                        active={useMemorySearch}
+                        onClick={() => setUseMemorySearch(prev => !prev)}
+                        description="Recall from memory"
                       />
                     </div>
                   </div>
