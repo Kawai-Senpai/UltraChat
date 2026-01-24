@@ -421,7 +421,9 @@ class VoiceManager:
         """Load Pocket TTS model.
         
         Args:
-            voice_name: Preset voice name (alba, marius, etc.) or path to reference audio
+            voice_name: Preset voice name (alba, marius, etc.) or path to reference audio.
+                        For file paths, requires authenticated access to kyutai/pocket-tts model.
+                        Falls back to 'alba' preset if voice cloning not available.
         """
         if not self.is_tts_available:
             logger.error("Pocket TTS not installed")
@@ -435,11 +437,29 @@ class VoiceManager:
                 model = PocketTTSModel.load_model(cache_dir=self._tts_cache_dir)
                 self._tts_model = model
                 
-                # Set initial voice state
+                # Determine voice to use
                 voice = voice_name or self._settings.voice_prompt_path or "alba"
-                self._tts_voice_state = model.get_state_for_audio_prompt(voice)
                 
-                logger.info(f"Pocket TTS loaded, sample_rate={model.sample_rate}")
+                # Preset voices that work without gated access
+                PRESET_VOICES = {"alba", "marius", "javert", "jean", "fantine", "cosette", "eponine", "azelma"}
+                
+                # Try to set initial voice state
+                try:
+                    if voice in PRESET_VOICES:
+                        # Use preset voice directly
+                        self._tts_voice_state = model.get_state_for_audio_prompt(voice)
+                        logger.info(f"Pocket TTS loaded with preset voice: {voice}")
+                    else:
+                        # Try to use custom voice file (requires gated model)
+                        self._tts_voice_state = model.get_state_for_audio_prompt(voice)
+                        logger.info(f"Pocket TTS loaded with custom voice: {voice}")
+                except ValueError as e:
+                    # Voice cloning not available - fallback to preset
+                    logger.warning(f"Voice cloning not available ({e}), falling back to 'alba' preset")
+                    self._tts_voice_state = model.get_state_for_audio_prompt("alba")
+                    logger.info("Pocket TTS loaded with fallback voice: alba")
+                
+                logger.info(f"TTS sample_rate={model.sample_rate}")
                 return True
             except Exception as e:
                 logger.error(f"Failed to load Pocket TTS: {e}")

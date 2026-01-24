@@ -201,14 +201,14 @@ export default function Sidebar({ isOpen, onNavigate, currentView, onToggle }) {
               </div>
               <div className="space-y-0.5">
                 {convs.map(conv => (
-                  <button
+                  <div
                     key={conv.id}
                     onClick={() => handleSelectConversation(conv)}
                     onMouseEnter={() => setHoveredId(conv.id)}
                     onMouseLeave={() => setHoveredId(null)}
                     className={`
                       w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left
-                      transition-all group
+                      transition-all group cursor-pointer
                       ${currentConversation?.id === conv.id 
                         ? 'bg-red-500/20 text-white' 
                         : 'text-neutral-400 hover:bg-white/5 hover:text-white'}
@@ -227,7 +227,7 @@ export default function Sidebar({ isOpen, onNavigate, currentView, onToggle }) {
                         <Trash2 className="w-3 h-3" />
                       </button>
                     )}
-                  </button>
+                  </div>
                 ))}
               </div>
             </div>

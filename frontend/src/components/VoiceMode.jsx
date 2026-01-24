@@ -1,11 +1,11 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useToast } from '../contexts/ToastContext'
 import { voiceAPI } from '../lib/api'
-import { useMicVAD, utils as vadUtils } from '@ricky0123/vad-react'
+import VoiceChatSession from './VoiceChatSession'
 import { 
   Mic, MicOff, Volume2, VolumeX, Phone, PhoneOff, 
   Loader2, Settings2, Upload, Trash2, Check, X,
-  Pause, Play, AlertCircle
+  Pause, Play, AlertCircle, Download
 } from 'lucide-react'
 
 /**
@@ -33,11 +33,13 @@ export default function VoiceMode({
   const [status, setStatus] = useState('initializing') // initializing, ready, listening, processing, speaking, error
   const [voiceStatus, setVoiceStatus] = useState(null)
   const [errorMessage, setErrorMessage] = useState('')
+  const [voiceChatActive, setVoiceChatActive] = useState(false)
   
   // Audio state
   const [isListening, setIsListening] = useState(false)
   const [isMuted, setIsMuted] = useState(false)
   const [volume, setVolume] = useState(1.0)
+  const [micLevel, setMicLevel] = useState(0)
   
   // Transcription
   const [partialTranscript, setPartialTranscript] = useState('')
@@ -53,59 +55,39 @@ export default function VoiceMode({
   const [activeVoice, setActiveVoice] = useState(null)
   const [uploadingVoice, setUploadingVoice] = useState(false)
   
-  // Refs
-  const wsRef = useRef(null)
-  const audioContextRef = useRef(null)
-  const nextPlayTimeRef = useRef(0)
-  const vadActiveRef = useRef(false)
-  
-  // VAD Hook - handles microphone and voice activity detection
-  const vad = useMicVAD({
-    startOnLoad: false,
-    onSpeechStart: () => {
-      console.log('[VAD] Speech started')
-      if (status === 'ready' || status === 'listening') {
-        setStatus('listening')
-        setIsListening(true)
-      }
-    },
-    onSpeechEnd: async (audio) => {
-      console.log('[VAD] Speech ended, audio length:', audio.length)
-      setIsListening(false)
-      
-      // Convert Float32Array to PCM16 and send to backend
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        const pcm16 = new Int16Array(audio.length)
-        for (let i = 0; i < audio.length; i++) {
-          pcm16[i] = Math.max(-32768, Math.min(32767, Math.floor(audio[i] * 32768)))
-        }
-        
-        // Send audio as binary
-        wsRef.current.send(pcm16.buffer)
-        
-        // Signal end of speech
-        wsRef.current.send(JSON.stringify({ type: 'speech_end' }))
-        setStatus('processing')
-      }
-    },
-    onVADMisfire: () => {
-      console.log('[VAD] Misfire (too short)')
-    },
-    positiveSpeechThreshold: 0.6,
-    negativeSpeechThreshold: 0.35,
-    redemptionFrames: 8,
-    frameSamples: 1536,
-    preSpeechPadFrames: 10,
-    minSpeechFrames: 4,
-  })
+  // Audio devices
+  const [audioDevices, setAudioDevices] = useState({ inputs: [], outputs: [] })
+  const [selectedInputDevice, setSelectedInputDevice] = useState('')
+  const [selectedOutputDevice, setSelectedOutputDevice] = useState('')
   
   // Load voice status on mount
   useEffect(() => {
     if (isActive) {
       loadVoiceStatus()
       loadVoices()
+      loadAudioDevices()
     }
   }, [isActive])
+  
+  // Load available audio devices
+  const loadAudioDevices = async () => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices()
+      const inputs = devices.filter(d => d.kind === 'audioinput')
+      const outputs = devices.filter(d => d.kind === 'audiooutput')
+      setAudioDevices({ inputs, outputs })
+      
+      // Set defaults if not selected
+      if (!selectedInputDevice && inputs.length > 0) {
+        setSelectedInputDevice(inputs[0].deviceId)
+      }
+      if (!selectedOutputDevice && outputs.length > 0) {
+        setSelectedOutputDevice(outputs[0].deviceId)
+      }
+    } catch (error) {
+      console.error('Failed to enumerate audio devices:', error)
+    }
+  }
   
   // Cleanup on unmount or deactivate
   useEffect(() => {
@@ -121,13 +103,80 @@ export default function VoiceMode({
       setVoiceStatus(status)
       
       if (!status.tts_loaded || !status.stt_loaded) {
-        setStatus('needs_setup')
+        // Auto-load TTS and STT
+        setStatus('initializing')
+        await autoLoadVoiceModels(status)
       } else {
         setStatus('ready')
       }
     } catch (error) {
       setStatus('error')
       setErrorMessage('Failed to load voice status')
+    }
+  }
+  
+  const autoLoadVoiceModels = async (currentStatus) => {
+    try {
+      // Load TTS if not loaded
+      if (!currentStatus?.tts_loaded) {
+        toast.info('Loading TTS model...')
+        try {
+          await voiceAPI.loadTTS()  // Will use default 'alba' voice
+          toast.success('TTS loaded')
+        } catch (err) {
+          console.error('TTS load failed:', err)
+          toast.error('TTS failed to load: ' + err.message)
+        }
+      }
+      
+      // Load STT if not loaded (will auto-download small English model if needed)
+      if (!currentStatus?.stt_loaded) {
+        // First check if any STT model is installed
+        const sttModels = await voiceAPI.listSTTModels()
+        
+        if (!sttModels.models?.length) {
+          // No models installed - download small English model
+          toast.info('Downloading STT model (first time setup)...')
+          try {
+            for await (const event of voiceAPI.downloadSTTModel('vosk-model-small-en-us-0.15', {})) {
+              if (event.type === 'done') {
+                toast.success('STT model downloaded')
+                break
+              } else if (event.type === 'error') {
+                toast.error('STT download failed: ' + event.message)
+                break
+              }
+            }
+          } catch (err) {
+            console.error('STT download failed:', err)
+            toast.error('Failed to download STT model')
+          }
+        }
+        
+        // Now try to load STT
+        toast.info('Loading STT model...')
+        try {
+          await voiceAPI.loadSTT()
+          toast.success('STT loaded')
+        } catch (err) {
+          console.error('STT load failed:', err)
+          toast.error('STT failed to load: ' + err.message)
+        }
+      }
+      
+      // Re-check status
+      const newStatus = await voiceAPI.getStatus()
+      setVoiceStatus(newStatus)
+      
+      if (newStatus.tts_loaded && newStatus.stt_loaded) {
+        setStatus('ready')
+      } else {
+        setStatus('needs_setup')
+      }
+    } catch (error) {
+      console.error('Auto-load failed:', error)
+      setStatus('error')
+      setErrorMessage('Failed to initialize voice: ' + error.message)
     }
   }
   
@@ -143,7 +192,7 @@ export default function VoiceMode({
   const loadTTS = async () => {
     setStatus('initializing')
     try {
-      await voiceAPI.loadTTS('auto')
+      await voiceAPI.loadTTS()
       toast.success('TTS loaded')
       await loadVoiceStatus()
     } catch (error) {
@@ -167,110 +216,31 @@ export default function VoiceMode({
   }
   
   const cleanup = () => {
-    if (wsRef.current) {
-      wsRef.current.close()
-      wsRef.current = null
-    }
-    // Stop VAD if running
-    if (vad.listening) {
-      vad.pause()
-    }
-    if (audioContextRef.current) {
-      audioContextRef.current.close()
-      audioContextRef.current = null
-    }
+    setVoiceChatActive(false)
     setIsListening(false)
     setPartialTranscript('')
     setFinalTranscript('')
     setLlmResponse('')
+    setMicLevel(0)
   }
   
   const startVoiceChat = async () => {
     try {
-      setStatus('connecting')
-      
-      // Create WebSocket connection
-      const ws = voiceAPI.createVoiceChatSocket()
-      wsRef.current = ws
-      
-      ws.onopen = () => {
-        // Send config
-        ws.send(JSON.stringify({
-          type: 'config',
-          enable_thinking: enableThinking,
-          tools: tools,
-          conversation_id: conversationId,
-          profile_id: profileId,
-        }))
-      }
-      
-      ws.onmessage = async (event) => {
-        if (typeof event.data === 'string') {
-          const data = JSON.parse(event.data)
-          
-          switch (data.type) {
-            case 'ready':
-              setStatus('ready')
-              // Initialize audio context with correct sample rate
-              audioContextRef.current = new AudioContext({ sampleRate: data.tts_sample_rate || 24000 })
-              nextPlayTimeRef.current = audioContextRef.current.currentTime
-              // Start VAD-based listening
-              vad.start()
-              setStatus('listening')
-              break
-              
-            case 'transcription':
-              if (data.final) {
-                setFinalTranscript(data.text)
-                setPartialTranscript('')
-              } else {
-                setPartialTranscript(data.text)
-              }
-              break
-              
-            case 'llm_token':
-              setIsGenerating(true)
-              setStatus('processing')
-              setLlmResponse(prev => prev + data.token)
-              break
-              
-            case 'audio':
-              if (!isMuted) {
-                // Decode base64 PCM16 and play
-                const pcm16 = Uint8Array.from(atob(data.data), c => c.charCodeAt(0))
-                await playAudioChunk(new Int16Array(pcm16.buffer))
-              }
-              setStatus('speaking')
-              break
-              
-            case 'done':
-              setIsGenerating(false)
-              setStatus('ready')
-              setLlmResponse('')
-              setFinalTranscript('')
-              break
-              
-            case 'error':
-              toast.error(data.message)
-              setStatus('error')
-              setErrorMessage(data.message)
-              break
-          }
-        }
-      }
-      
-      ws.onerror = () => {
+      // Request microphone permission first
+      try {
+        const s = await navigator.mediaDevices.getUserMedia({ audio: true })
+        s.getTracks().forEach(t => t.stop())
+      } catch (err) {
+        console.error('Microphone permission denied:', err)
+        toast.error('Microphone access denied. Please allow microphone access and try again.')
         setStatus('error')
-        setErrorMessage('WebSocket connection failed')
+        setErrorMessage('Microphone access denied')
+        return
       }
       
-      ws.onclose = () => {
-        if (status !== 'error') {
-          setStatus('ready')
-        }
-        setIsListening(false)
-      }
-      
+      // Start the voice chat session (mounts the VoiceChatSession component)
+      setVoiceChatActive(true)
+      setStatus('connecting')
     } catch (error) {
       toast.error('Failed to start voice chat: ' + error.message)
       setStatus('error')
@@ -279,54 +249,52 @@ export default function VoiceMode({
   }
   
   const stopVoiceChat = () => {
-    if (wsRef.current) {
-      wsRef.current.send(JSON.stringify({ type: 'stop' }))
-    }
+    setVoiceChatActive(false)
     cleanup()
     setStatus('ready')
   }
   
-  // VAD-controlled listening - toggle VAD on/off for push-to-talk mode
-  const toggleListening = () => {
-    if (vad.listening) {
-      vad.pause()
-      setIsListening(false)
+  // Callback handlers for VoiceChatSession
+  const handleTranscript = (text, isFinal) => {
+    if (isFinal) {
+      setFinalTranscript(text)
+      setPartialTranscript('')
     } else {
-      vad.start()
+      setPartialTranscript(text)
+    }
+  }
+  
+  const handleLLMToken = (token) => {
+    setIsGenerating(true)
+    setLlmResponse(prev => prev + token)
+  }
+  
+  const handleAudio = () => {
+    setStatus('speaking')
+  }
+  
+  const handleDone = () => {
+    setIsGenerating(false)
+    setLlmResponse('')
+    setFinalTranscript('')
+  }
+  
+  const handleError = (message) => {
+    toast.error(message)
+    setStatus('error')
+    setErrorMessage(message)
+  }
+  
+  const handleStatusChange = (newStatus) => {
+    setStatus(newStatus)
+    if (newStatus === 'listening') {
       setIsListening(true)
-      setStatus('listening')
+    } else {
+      setIsListening(false)
     }
   }
   
-  const playAudioChunk = async (pcm16) => {
-    if (!audioContextRef.current) return
-    
-    const ctx = audioContextRef.current
-    const floats = new Float32Array(pcm16.length)
-    for (let i = 0; i < pcm16.length; i++) {
-      floats[i] = pcm16[i] / 32768
-    }
-    
-    const buffer = ctx.createBuffer(1, floats.length, ctx.sampleRate)
-    buffer.copyToChannel(floats, 0)
-    
-    const source = ctx.createBufferSource()
-    source.buffer = buffer
-    
-    // Apply volume
-    const gainNode = ctx.createGain()
-    gainNode.gain.value = volume
-    source.connect(gainNode)
-    gainNode.connect(ctx.destination)
-    
-    // Schedule playback
-    if (nextPlayTimeRef.current < ctx.currentTime) {
-      nextPlayTimeRef.current = ctx.currentTime
-    }
-    source.start(nextPlayTimeRef.current)
-    nextPlayTimeRef.current += buffer.duration
-  }
-  
+  // Voice management functions
   const handleVoiceUpload = async (e) => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -370,6 +338,10 @@ export default function VoiceMode({
       toast.error('Delete failed: ' + error.message)
     }
   }
+
+  const micLevelPct = voiceChatActive
+    ? Math.max(0, Math.min(100, Math.round(micLevel * 250)))
+    : 0
   
   if (!isActive) return null
   
@@ -461,6 +433,28 @@ export default function VoiceMode({
         {/* Ready / Active states */}
         {['ready', 'listening', 'processing', 'speaking', 'connecting'].includes(status) && (
           <>
+            {/* Status message */}
+            <div className="text-center mb-4">
+              {!voiceChatActive && status === 'ready' && (
+                <p className="text-zinc-400 text-sm">Click the green button to start voice chat</p>
+              )}
+              {voiceChatActive && status === 'ready' && (
+                <p className="text-green-400 text-sm">🎤 Voice chat active - speak when ready</p>
+              )}
+              {status === 'listening' && (
+                <p className="text-green-400 text-sm animate-pulse">🎙️ Listening... speak now</p>
+              )}
+              {status === 'processing' && (
+                <p className="text-yellow-400 text-sm">⏳ Processing your speech...</p>
+              )}
+              {status === 'speaking' && (
+                <p className="text-blue-400 text-sm">🔊 AI is speaking...</p>
+              )}
+              {status === 'connecting' && (
+                <p className="text-zinc-400 text-sm">Connecting...</p>
+              )}
+            </div>
+            
             {/* Visualization area */}
             <div className="w-48 h-48 rounded-full bg-zinc-900 border-2 border-zinc-800 flex items-center justify-center relative">
               {status === 'listening' && (
@@ -474,6 +468,7 @@ export default function VoiceMode({
                 status === 'listening' ? 'bg-green-500/20' :
                 status === 'speaking' ? 'bg-blue-500/20' :
                 status === 'processing' ? 'bg-yellow-500/20' :
+                voiceChatActive ? 'bg-green-500/10' :
                 'bg-zinc-800'
               }`}>
                 {status === 'listening' ? (
@@ -482,6 +477,8 @@ export default function VoiceMode({
                   <Volume2 className="w-12 h-12 text-blue-500" />
                 ) : status === 'processing' ? (
                   <Loader2 className="w-12 h-12 text-yellow-500 animate-spin" />
+                ) : voiceChatActive ? (
+                  <Mic className="w-12 h-12 text-green-400 animate-pulse" />
                 ) : (
                   <Phone className="w-12 h-12 text-zinc-500" />
                 )}
@@ -489,15 +486,18 @@ export default function VoiceMode({
             </div>
             
             {/* Transcript display */}
-            <div className="w-full min-h-[60px] text-center">
+            <div className="w-full min-h-16 text-center px-4">
+              {!voiceChatActive && !partialTranscript && !finalTranscript && !llmResponse && (
+                <p className="text-zinc-600 text-xs">Transcripts will appear here</p>
+              )}
               {partialTranscript && (
-                <p className="text-zinc-500 italic">{partialTranscript}</p>
+                <p className="text-zinc-500 italic text-sm">{partialTranscript}</p>
               )}
               {finalTranscript && (
-                <p className="text-white">{finalTranscript}</p>
+                <p className="text-white text-sm">{finalTranscript}</p>
               )}
               {llmResponse && (
-                <p className="text-blue-400 mt-2">{llmResponse}</p>
+                <p className="text-blue-400 mt-2 text-sm">{llmResponse}</p>
               )}
             </div>
             
@@ -514,7 +514,7 @@ export default function VoiceMode({
               </button>
               
               {/* Main call button */}
-              {status === 'ready' ? (
+              {!voiceChatActive ? (
                 <button
                   onClick={startVoiceChat}
                   className="p-6 rounded-full bg-green-600 hover:bg-green-500 text-white transition-colors"
@@ -530,168 +530,254 @@ export default function VoiceMode({
                 </button>
               )}
               
-              {/* Toggle VAD listening */}
-              <button
-                onClick={toggleListening}
-                className={`p-3 rounded-full transition-colors ${
-                  vad.listening ? 'bg-green-500/20 text-green-500' : 'bg-zinc-800 text-zinc-400 hover:text-white'
+              {/* Mic status indicator */}
+              <div
+                className={`p-3 rounded-full ${
+                  isListening ? 'bg-green-500/20 text-green-500' : 'bg-zinc-800 text-zinc-400'
                 }`}
-                title={vad.listening ? 'Mute microphone' : 'Unmute microphone'}
               >
-                {vad.listening ? <Mic className="w-6 h-6" /> : <MicOff className="w-6 h-6" />}
-              </button>
+                {isListening ? <Mic className="w-6 h-6" /> : <MicOff className="w-6 h-6" />}
+              </div>
             </div>
             
-            {/* VAD status indicator */}
-            {vad.loading && (
-              <p className="text-xs text-zinc-500 mt-2">Loading voice detection...</p>
-            )}
-            {vad.errored && (
-              <p className="text-xs text-red-400 mt-2">VAD error: microphone access denied</p>
+            {/* Voice chat session - mounts VAD only when active */}
+            {voiceChatActive && (
+              <VoiceChatSession
+                onTranscript={handleTranscript}
+                onLLMToken={handleLLMToken}
+                onAudio={handleAudio}
+                onDone={handleDone}
+                onError={handleError}
+                onStatusChange={handleStatusChange}
+                onMicLevel={setMicLevel}
+                conversationId={conversationId}
+                profileId={profileId}
+                enableThinking={enableThinking}
+                tools={tools}
+                inputDeviceId={selectedInputDevice}
+                outputDeviceId={selectedOutputDevice}
+                volume={volume}
+              />
             )}
           </>
         )}
       </div>
       
-      {/* Settings panel */}
+      {/* Settings panel - Redesigned to match brand */}
       {showSettings && (
-        <div className="absolute right-0 top-0 bottom-0 w-80 bg-zinc-900 border-l border-zinc-800 p-4 overflow-y-auto">
-          <h3 className="text-lg font-medium text-white mb-4">Voice Settings</h3>
-          
-          {/* Volume slider */}
-          <div className="mb-6">
-            <label className="text-xs text-zinc-400 mb-2 block">Volume</label>
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.1"
-              value={volume}
-              onChange={(e) => setVolume(parseFloat(e.target.value))}
-              className="w-full"
-            />
+        <div className="absolute right-0 top-0 bottom-0 w-80 bg-neutral-950 border-l border-white/10 overflow-y-auto">
+          {/* Header */}
+          <div className="p-5 border-b border-white/10">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-black text-white">Voice Settings</h3>
+              <button
+                onClick={() => setShowSettings(false)}
+                className="p-1.5 rounded-lg hover:bg-white/10 text-neutral-400 transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
           </div>
           
-          {/* Voice selection */}
-          <div className="mb-6">
-            <div className="flex items-center justify-between mb-2">
-              <label className="text-xs text-zinc-400">Voice Cloning</label>
-              <label className="cursor-pointer">
-                <input
-                  type="file"
-                  accept=".wav,.mp3,.flac,.ogg"
-                  onChange={handleVoiceUpload}
-                  className="hidden"
-                />
-                <span className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1">
-                  <Upload className="w-3 h-3" />
-                  Upload
+          <div className="p-5 space-y-6">
+            {/* Mic Level Visualizer - Enhanced */}
+            <div>
+              <label className="text-xs font-bold text-white mb-3 block">Microphone Status</label>
+              <div className="flex items-center gap-2">
+                <Mic className="w-4 h-4 text-neutral-500" />
+                <div className="flex-1 h-2 bg-white/5 rounded-full overflow-hidden">
+                  <div 
+                    className={`h-full transition-all duration-100 ${
+                      isListening ? 'bg-green-500' : voiceChatActive ? 'bg-blue-500/70' : 'bg-neutral-700'
+                    }`}
+                    style={{ 
+                      width: `${micLevelPct}%`,
+                      animation: isListening ? 'pulse 0.4s ease-in-out infinite' : 'none'
+                    }}
+                  />
+                </div>
+                <span className="text-[10px] text-neutral-500 w-20 text-right font-mono">
+                  {isListening ? '🎤 Active' : voiceChatActive ? '🔄 Ready' : '⏸️ Off'}
                 </span>
-              </label>
+              </div>
+              <p className="text-[10px] text-neutral-500 mt-2">
+                {!voiceChatActive && 'Start voice chat to begin'}
+                {voiceChatActive && !isListening && 'Listening for speech...'}
+                {isListening && '✨ Speech detected - listening!'}
+              </p>
             </div>
             
-            {uploadingVoice && (
-              <div className="flex items-center gap-2 text-xs text-zinc-400 mb-2">
-                <Loader2 className="w-3 h-3 animate-spin" />
-                Uploading...
-              </div>
-            )}
-            
-            <div className="space-y-1">
-              {/* Default voice option */}
-              <button
-                onClick={() => {
-                  voiceAPI.clearActiveVoice()
-                  setActiveVoice(null)
-                }}
-                className={`w-full flex items-center justify-between px-3 py-2 rounded text-sm ${
-                  !activeVoice ? 'bg-blue-500/20 text-blue-400' : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
-                }`}
+            {/* Input Device */}
+            <div>
+              <label className="text-xs font-bold text-white mb-3 block">Input Device</label>
+              <select
+                value={selectedInputDevice}
+                onChange={(e) => setSelectedInputDevice(e.target.value)}
+                className="w-full px-0 py-2 bg-transparent border-0 border-b border-white/20 
+                         text-white text-xs focus:border-red-500 focus:outline-none transition-colors"
               >
-                <span>Default Voice</span>
-                {!activeVoice && <Check className="w-4 h-4" />}
-              </button>
+                {audioDevices.inputs.map(device => (
+                  <option key={device.deviceId} value={device.deviceId} className="bg-neutral-900">
+                    {device.label || `Microphone ${device.deviceId.slice(0, 8)}`}
+                  </option>
+                ))}
+              </select>
+            </div>
+            
+            {/* Output Device */}
+            <div>
+              <label className="text-xs font-bold text-white mb-3 block">Output Device</label>
+              <select
+                value={selectedOutputDevice}
+                onChange={(e) => setSelectedOutputDevice(e.target.value)}
+                className="w-full px-0 py-2 bg-transparent border-0 border-b border-white/20 
+                         text-white text-xs focus:border-red-500 focus:outline-none transition-colors"
+              >
+                {audioDevices.outputs.map(device => (
+                  <option key={device.deviceId} value={device.deviceId} className="bg-neutral-900">
+                    {device.label || `Speaker ${device.deviceId.slice(0, 8)}`}
+                  </option>
+                ))}
+              </select>
+            </div>
+            
+            {/* Volume Control */}
+            <div>
+              <div className="flex items-center justify-between mb-3">
+                <label className="text-xs font-bold text-white">Output Volume</label>
+                <span className="text-xs text-red-400 font-mono">{Math.round(volume * 100)}%</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={volume}
+                onChange={(e) => setVolume(parseFloat(e.target.value))}
+                className="w-full accent-red-500"
+              />
+            </div>
+            
+            {/* Divider */}
+            <div className="border-t border-white/10" />
+            
+            {/* TTS Voice Selection */}
+            <div>
+              <div className="flex items-center justify-between mb-3">
+                <label className="text-xs font-bold text-white">TTS Voice</label>
+                <label className="cursor-pointer text-[10px] text-red-400 hover:text-red-300 flex items-center gap-1">
+                  <input
+                    type="file"
+                    accept=".wav,.mp3,.flac,.ogg"
+                    onChange={handleVoiceUpload}
+                    className="hidden"
+                  />
+                  <Upload className="w-3 h-3" />
+                  Clone Voice
+                </label>
+              </div>
               
-              {/* Custom voices */}
-              {voices.map(voice => (
-                <div
-                  key={voice.name}
-                  className={`flex items-center justify-between px-3 py-2 rounded text-sm ${
-                    activeVoice === voice.name ? 'bg-blue-500/20 text-blue-400' : 'bg-zinc-800 text-zinc-300'
-                  }`}
-                >
+              {uploadingVoice && (
+                <div className="flex items-center gap-2 text-[10px] text-neutral-400 mb-3">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  Uploading voice sample...
+                </div>
+              )}
+              
+              <div className="space-y-1 max-h-32 overflow-y-auto">
+                {/* Preset voices */}
+                {['alba', 'marius', 'jean', 'fantine'].map(voiceName => (
                   <button
-                    onClick={() => handleSetVoice(voice.name)}
-                    className="flex-1 text-left"
+                    key={voiceName}
+                    onClick={() => handleSetVoice(voiceName)}
+                    className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs transition-colors ${
+                      activeVoice === voiceName 
+                        ? 'bg-red-500/20 text-red-400 border border-red-500/30' 
+                        : 'bg-white/5 text-neutral-300 hover:bg-white/10 border border-transparent'
+                    }`}
                   >
-                    {voice.name}
+                    <span className="capitalize">{voiceName}</span>
+                    {activeVoice === voiceName && <Check className="w-3 h-3" />}
                   </button>
-                  <div className="flex items-center gap-1">
-                    {activeVoice === voice.name && <Check className="w-4 h-4" />}
+                ))}
+                
+                {/* Custom voices */}
+                {voices.filter(v => !['alba', 'marius', 'jean', 'fantine'].includes(v.name)).map(voice => (
+                  <div
+                    key={voice.name}
+                    className={`flex items-center justify-between px-3 py-2 rounded-lg text-xs ${
+                      activeVoice === voice.name 
+                        ? 'bg-red-500/20 text-red-400 border border-red-500/30' 
+                        : 'bg-white/5 text-neutral-300 border border-transparent'
+                    }`}
+                  >
                     <button
-                      onClick={() => handleDeleteVoice(voice.name)}
-                      className="p-1 text-zinc-500 hover:text-red-400"
+                      onClick={() => handleSetVoice(voice.name)}
+                      className="flex-1 text-left"
                     >
-                      <Trash2 className="w-3 h-3" />
+                      {voice.name}
                     </button>
+                    <div className="flex items-center gap-1">
+                      {activeVoice === voice.name && <Check className="w-3 h-3" />}
+                      <button
+                        onClick={() => handleDeleteVoice(voice.name)}
+                        className="p-1 text-neutral-500 hover:text-red-400 transition-colors"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            
+            {/* Divider */}
+            <div className="border-t border-white/10" />
+            
+            {/* Model Status */}
+            <div>
+              <label className="text-xs font-bold text-white mb-3 block">Model Status</label>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between p-3 bg-white/5 rounded-lg">
+                  <div className="flex items-center gap-2">
+                    <Volume2 className="w-4 h-4 text-neutral-500" />
+                    <span className="text-xs text-neutral-300">TTS</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {voiceStatus?.tts_loaded ? (
+                      <>
+                        <span className="text-[10px] text-green-400">Loaded</span>
+                        <div className="w-2 h-2 rounded-full bg-green-500" />
+                      </>
+                    ) : (
+                      <>
+                        <span className="text-[10px] text-neutral-500">Not loaded</span>
+                        <div className="w-2 h-2 rounded-full bg-neutral-600" />
+                      </>
+                    )}
                   </div>
                 </div>
-              ))}
-            </div>
-          </div>
-          
-          {/* Model status */}
-          <div className="mb-6">
-            <label className="text-xs text-zinc-400 mb-2 block">Model Status</label>
-            <div className="space-y-2 text-xs">
-              <div className="flex items-center justify-between">
-                <span className="text-zinc-500">TTS</span>
-                <span className={voiceStatus?.tts_loaded ? 'text-green-400' : 'text-zinc-500'}>
-                  {voiceStatus?.tts_loaded ? `Loaded (${voiceStatus.tts_device})` : 'Not loaded'}
-                </span>
+                <div className="flex items-center justify-between p-3 bg-white/5 rounded-lg">
+                  <div className="flex items-center gap-2">
+                    <Mic className="w-4 h-4 text-neutral-500" />
+                    <span className="text-xs text-neutral-300">STT</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {voiceStatus?.stt_loaded ? (
+                      <>
+                        <span className="text-[10px] text-green-400">Loaded</span>
+                        <div className="w-2 h-2 rounded-full bg-green-500" />
+                      </>
+                    ) : (
+                      <>
+                        <span className="text-[10px] text-neutral-500">Not loaded</span>
+                        <div className="w-2 h-2 rounded-full bg-neutral-600" />
+                      </>
+                    )}
+                  </div>
+                </div>
               </div>
-              <div className="flex items-center justify-between">
-                <span className="text-zinc-500">STT</span>
-                <span className={voiceStatus?.stt_loaded ? 'text-green-400' : 'text-zinc-500'}>
-                  {voiceStatus?.stt_loaded ? 'Loaded' : 'Not loaded'}
-                </span>
-              </div>
             </div>
-          </div>
-          
-          {/* Load/unload buttons */}
-          <div className="space-y-2">
-            {!voiceStatus?.tts_loaded ? (
-              <button
-                onClick={loadTTS}
-                className="w-full px-3 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded text-sm"
-              >
-                Load TTS
-              </button>
-            ) : (
-              <button
-                onClick={() => voiceAPI.unloadTTS().then(loadVoiceStatus)}
-                className="w-full px-3 py-2 bg-zinc-700 hover:bg-zinc-600 text-white rounded text-sm"
-              >
-                Unload TTS
-              </button>
-            )}
-            
-            {!voiceStatus?.stt_loaded ? (
-              <button
-                onClick={loadSTT}
-                className="w-full px-3 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded text-sm"
-              >
-                Load STT
-              </button>
-            ) : (
-              <button
-                onClick={() => voiceAPI.unloadSTT().then(loadVoiceStatus)}
-                className="w-full px-3 py-2 bg-zinc-700 hover:bg-zinc-600 text-white rounded text-sm"
-              >
-                Unload STT
-              </button>
-            )}
           </div>
         </div>
       )}

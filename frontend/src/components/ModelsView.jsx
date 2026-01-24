@@ -93,6 +93,46 @@ export default function ModelsView({ onBack }) {
       toast.error('Failed to delete: ' + error.message)
     }
   }
+  
+  const handleLoadTTS = async () => {
+    try {
+      await voiceAPI.loadTTS()
+      toast.success('TTS loaded')
+      await loadVoiceStatus()
+    } catch (error) {
+      toast.error('Failed to load TTS: ' + error.message)
+    }
+  }
+  
+  const handleUnloadTTS = async () => {
+    try {
+      await voiceAPI.unloadTTS()
+      toast.success('TTS unloaded')
+      await loadVoiceStatus()
+    } catch (error) {
+      toast.error('Failed to unload TTS: ' + error.message)
+    }
+  }
+  
+  const handleLoadSTT = async () => {
+    try {
+      await voiceAPI.loadSTT()
+      toast.success('STT loaded')
+      await loadVoiceStatus()
+    } catch (error) {
+      toast.error('Failed to load STT: ' + error.message)
+    }
+  }
+  
+  const handleUnloadSTT = async () => {
+    try {
+      await voiceAPI.unloadSTT()
+      toast.success('STT unloaded')
+      await loadVoiceStatus()
+    } catch (error) {
+      toast.error('Failed to unload STT: ' + error.message)
+    }
+  }
 
   const handleSearch = async () => {
     if (!searchQuery.trim()) return
@@ -654,16 +694,35 @@ export default function ModelsView({ onBack }) {
             {/* Voice Status */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
               <div className="p-3 bg-neutral-900/50 rounded-lg">
-                <div className="flex items-center gap-2 mb-1">
-                  <Volume2 className="w-3.5 h-3.5 text-neutral-500" />
-                  <span className="text-[10px] text-neutral-500 uppercase tracking-wide">TTS (Chatterbox)</span>
+                <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center gap-2">
+                    <Volume2 className="w-3.5 h-3.5 text-neutral-500" />
+                    <span className="text-[10px] text-neutral-500 uppercase tracking-wide">TTS (Pocket TTS)</span>
+                  </div>
+                  {voiceStatus?.tts_available && (
+                    voiceStatus?.tts_loaded ? (
+                      <button
+                        onClick={handleUnloadTTS}
+                        className="px-2 py-0.5 text-[10px] bg-red-500/20 text-red-400 rounded hover:bg-red-500/30 transition-colors"
+                      >
+                        Unload
+                      </button>
+                    ) : (
+                      <button
+                        onClick={handleLoadTTS}
+                        className="px-2 py-0.5 text-[10px] bg-green-500/20 text-green-400 rounded hover:bg-green-500/30 transition-colors"
+                      >
+                        Load
+                      </button>
+                    )
+                  )}
                 </div>
                 <div className="text-xs text-white">
                   {voiceStatus?.tts_available ? (
                     voiceStatus?.tts_loaded ? (
-                      <span className="text-green-400">Loaded ({voiceStatus.tts_device})</span>
+                      <span className="text-green-400">Loaded</span>
                     ) : (
-                      <span className="text-yellow-400">Available (not loaded)</span>
+                      <span className="text-yellow-400">Not loaded</span>
                     )
                   ) : (
                     <span className="text-red-400">Not installed</span>
@@ -671,22 +730,41 @@ export default function ModelsView({ onBack }) {
                 </div>
                 {!voiceStatus?.tts_available && (
                   <p className="text-[10px] text-neutral-500 mt-1">
-                    Run: pip install chatterbox-tts
+                    Run: pip install pocket-tts
                   </p>
                 )}
               </div>
               
               <div className="p-3 bg-neutral-900/50 rounded-lg">
-                <div className="flex items-center gap-2 mb-1">
-                  <Mic className="w-3.5 h-3.5 text-neutral-500" />
-                  <span className="text-[10px] text-neutral-500 uppercase tracking-wide">STT (Vosk)</span>
+                <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center gap-2">
+                    <Mic className="w-3.5 h-3.5 text-neutral-500" />
+                    <span className="text-[10px] text-neutral-500 uppercase tracking-wide">STT (Vosk)</span>
+                  </div>
+                  {voiceStatus?.stt_available && (
+                    voiceStatus?.stt_loaded ? (
+                      <button
+                        onClick={handleUnloadSTT}
+                        className="px-2 py-0.5 text-[10px] bg-red-500/20 text-red-400 rounded hover:bg-red-500/30 transition-colors"
+                      >
+                        Unload
+                      </button>
+                    ) : (
+                      <button
+                        onClick={handleLoadSTT}
+                        className="px-2 py-0.5 text-[10px] bg-green-500/20 text-green-400 rounded hover:bg-green-500/30 transition-colors"
+                      >
+                        Load
+                      </button>
+                    )
+                  )}
                 </div>
                 <div className="text-xs text-white">
                   {voiceStatus?.stt_available ? (
                     voiceStatus?.stt_loaded ? (
                       <span className="text-green-400">Loaded</span>
                     ) : (
-                      <span className="text-yellow-400">Available (not loaded)</span>
+                      <span className="text-yellow-400">Not loaded</span>
                     )
                   ) : (
                     <span className="text-red-400">Not installed</span>
