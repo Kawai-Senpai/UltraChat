@@ -31,6 +31,7 @@ async def get_settings_endpoint():
         "model": settings.model.model_dump(),
         "chat_defaults": settings.chat_defaults.model_dump(),
         "ui": settings.ui.model_dump(),
+        "speculative_decoding": settings.speculative_decoding.model_dump(),
     }
 
 
@@ -53,6 +54,9 @@ async def update_settings(data: SettingsUpdate):
     if data.ui:
         update_data['ui'] = data.ui.model_dump(exclude_unset=True)
     
+    if data.speculative_decoding:
+        update_data['speculative_decoding'] = data.speculative_decoding.model_dump(exclude_unset=True)
+    
     new_settings = manager.update(**update_data)
     
     return {
@@ -64,6 +68,7 @@ async def update_settings(data: SettingsUpdate):
             "model": new_settings.model.model_dump(),
             "chat_defaults": new_settings.chat_defaults.model_dump(),
             "ui": new_settings.ui.model_dump(),
+            "speculative_decoding": new_settings.speculative_decoding.model_dump(),
         }
     }
 
@@ -84,6 +89,7 @@ async def reset_settings():
             "model": new_settings.model.model_dump(),
             "chat_defaults": new_settings.chat_defaults.model_dump(),
             "ui": new_settings.ui.model_dump(),
+            "speculative_decoding": new_settings.speculative_decoding.model_dump(),
         }
     }
 

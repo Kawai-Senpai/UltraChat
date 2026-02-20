@@ -25,6 +25,10 @@ from .constants import (
     DEFAULT_EXPORTS_DIR,
     DEFAULT_MODELS_DIR,
     DEFAULT_THEME,
+    DEFAULT_NUM_ASSISTANT_TOKENS,
+    DEFAULT_ASSISTANT_TOKENS_SCHEDULE,
+    DEFAULT_SPECULATIVE_ENABLED,
+    DEFAULT_ATTENTION_IMPLEMENTATION,
 )
 
 
@@ -59,6 +63,7 @@ class ModelSettings(BaseModel):
     default_quantization: str = DEFAULT_QUANTIZATION
     auto_load_last: bool = True  # Auto-load last used model on startup
     use_torch_compile: bool = False  # torch.compile (experimental, may cause issues on some PyTorch versions)
+    attention_implementation: str = DEFAULT_ATTENTION_IMPLEMENTATION  # "auto", "flash_attention_2", "sdpa", "eager"
 
 
 class ChatDefaults(BaseModel):
@@ -94,6 +99,13 @@ class VoiceSettings(BaseModel):
     auto_load_tts: bool = False  # Auto-load TTS on startup
 
 
+class SpeculativeDecodingSettings(BaseModel):
+    """Speculative decoding configuration for faster inference."""
+    enabled: bool = DEFAULT_SPECULATIVE_ENABLED  # Auto-enable when assistant model is loaded
+    num_assistant_tokens: int = DEFAULT_NUM_ASSISTANT_TOKENS  # K value: tokens proposed per step
+    assistant_tokens_schedule: str = DEFAULT_ASSISTANT_TOKENS_SCHEDULE  # "constant" or "heuristic"
+
+
 class AppSettings(BaseSettings):
     """Main application settings."""
     app_name: str = "UltraChat"
@@ -108,6 +120,7 @@ class AppSettings(BaseSettings):
     chat_defaults: ChatDefaults = ChatDefaults()
     ui: UISettings = UISettings()
     voice: VoiceSettings = VoiceSettings()
+    speculative_decoding: SpeculativeDecodingSettings = SpeculativeDecodingSettings()
     
     class Config:
         env_prefix = "ULTRACHAT_"

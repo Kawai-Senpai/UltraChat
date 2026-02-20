@@ -35,6 +35,11 @@ export default function SettingsView({ onBack }) {
       chunk_max_wait_s: 0.7,
       auto_load_tts: false,
     },
+    speculative_decoding: {
+      enabled: true,
+      num_assistant_tokens: 4,
+      assistant_tokens_schedule: 'heuristic',
+    },
   })
   const [storagePath, setStoragePath] = useState('')
   const [isSaving, setIsSaving] = useState(false)
@@ -355,6 +360,28 @@ export default function SettingsView({ onBack }) {
                 </ul>
               </div>
               
+              {/* Attention Implementation */}
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <Zap className="w-4 h-4 text-neutral-500" />
+                  <label className="text-xs font-bold text-neutral-300">Attention Implementation</label>
+                </div>
+                <select
+                  value={settings.model.attention_implementation || 'auto'}
+                  onChange={(e) => updateSetting('model', 'attention_implementation', e.target.value)}
+                  className="w-full px-4 py-2.5 bg-neutral-900 border border-white/10 rounded-lg
+                             text-xs text-white focus:outline-none focus:border-red-500/50"
+                >
+                  <option value="auto">Auto (use Flash Attention if available)</option>
+                  <option value="flash_attention_2">Flash Attention 2 (fastest, requires flash_attn)</option>
+                  <option value="sdpa">SDPA (PyTorch built-in, works everywhere)</option>
+                  <option value="eager">Eager (slowest, most compatible)</option>
+                </select>
+                <p className="text-[10px] text-neutral-500 mt-1">
+                  Flash Attention is fastest but requires the flash_attn package. SDPA is built into PyTorch and works on all systems. Requires model reload.
+                </p>
+              </div>
+              
               <ToggleSetting
                 label="torch.compile (Experimental)"
                 description="JIT compile model for 20-40% faster inference. May cause issues on PyTorch 2.9.x. Only applies to fp16/fp32 models."
@@ -473,6 +500,78 @@ export default function SettingsView({ onBack }) {
                 checked={settings.ui.compact_mode}
                 onChange={(val) => updateSetting('ui', 'compact_mode', val)}
               />
+            </div>
+          </section>
+
+          {/* Speculative Decoding Settings */}
+          <section className="p-5 bg-white/5 border border-white/10 rounded-xl">
+            <div className="flex items-center gap-3 mb-5">
+              <div className="w-10 h-10 rounded-xl bg-blue-500/20 flex items-center justify-center">
+                <Zap className="w-5 h-5 text-blue-400" />
+              </div>
+              <div>
+                <h3 className="text-xs font-black text-white">Speculative Decoding</h3>
+                <p className="text-[10px] text-neutral-500">Speed up generation with a draft model</p>
+              </div>
+            </div>
+            
+            <div className="space-y-4">
+              <ToggleSetting
+                label="Enable speculative decoding"
+                description="Use assistant model for faster generation when loaded"
+                checked={settings.speculative_decoding?.enabled ?? true}
+                onChange={(val) => updateSetting('speculative_decoding', 'enabled', val)}
+              />
+              
+              {/* Number of assistant tokens (K value) */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <Zap className="w-4 h-4 text-neutral-500" />
+                    <label className="text-xs font-bold text-neutral-300">Draft Tokens (K)</label>
+                  </div>
+                  <span className="text-xs text-white font-mono px-2 py-0.5 bg-white/10 rounded">
+                    {settings.speculative_decoding?.num_assistant_tokens ?? 4}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min="1"
+                  max="10"
+                  step="1"
+                  value={settings.speculative_decoding?.num_assistant_tokens ?? 4}
+                  onChange={(e) => updateSetting('speculative_decoding', 'num_assistant_tokens', parseInt(e.target.value))}
+                  className="w-full"
+                />
+                <div className="flex justify-between text-[10px] text-neutral-500 mt-1">
+                  <span>Conservative (1)</span>
+                  <span>Balanced (4-5)</span>
+                  <span>Aggressive (10)</span>
+                </div>
+                <p className="text-[10px] text-neutral-500 mt-2">
+                  Number of tokens the draft model proposes per step. Higher = faster but may reduce accuracy.
+                </p>
+              </div>
+              
+              {/* Token schedule */}
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <Sliders className="w-4 h-4 text-neutral-500" />
+                  <label className="text-xs font-bold text-neutral-300">Token Schedule</label>
+                </div>
+                <select
+                  value={settings.speculative_decoding?.assistant_tokens_schedule ?? 'heuristic'}
+                  onChange={(e) => updateSetting('speculative_decoding', 'assistant_tokens_schedule', e.target.value)}
+                  className="w-full px-4 py-2.5 bg-neutral-900 border border-white/10 rounded-lg
+                             text-xs text-white focus:outline-none focus:border-blue-500/50"
+                >
+                  <option value="constant">Constant - Fixed K value</option>
+                  <option value="heuristic">Heuristic - Auto-adjust based on acceptance rate</option>
+                </select>
+                <p className="text-[10px] text-neutral-500 mt-1">
+                  "Heuristic" automatically adjusts K based on how many tokens get accepted.
+                </p>
+              </div>
             </div>
           </section>
 

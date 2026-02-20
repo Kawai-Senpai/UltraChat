@@ -7,6 +7,7 @@ export function AppProvider({ children }) {
   // System state
   const [gpuInfo, setGpuInfo] = useState(null)
   const [loadedModel, setLoadedModel] = useState(null)
+  const [assistantModel, setAssistantModel] = useState(null)
   const [localModels, setLocalModels] = useState([])
   
   // Chat state
@@ -37,6 +38,7 @@ export function AppProvider({ children }) {
         gpu: status.gpu, // Raw GPU info object
       })
       setLoadedModel(status.current_model)
+      setAssistantModel(status.current_assistant_model)
     } catch (error) {
       console.error('Failed to load system status:', error)
     }
@@ -95,6 +97,8 @@ export function AppProvider({ children }) {
     gpuInfo,
     loadedModel,
     setLoadedModel,
+    assistantModel,
+    setAssistantModel,
     localModels,
     loadLocalModels,
     loadSystemStatus,

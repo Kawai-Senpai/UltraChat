@@ -175,6 +175,12 @@ export const modelsAPI = {
   unloadModel: () => api.post('/models/unload', {}),
   setFavorite: (modelId, isFavorite = true) => 
     api.post(`/models/${encodeURIComponent(modelId)}/favorite?is_favorite=${isFavorite}`, {}),
+  
+  // Assistant model (speculative decoding)
+  getAssistantStatus: () => api.get('/models/assistant/status'),
+  loadAssistantModel: (modelId, quantization = null) =>
+    api.post('/models/assistant/load', { model_id: modelId, quantization }),
+  unloadAssistantModel: () => api.post('/models/assistant/unload', {}),
 }
 
 // Profiles API

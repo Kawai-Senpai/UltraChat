@@ -23,7 +23,7 @@ const LOAD_QUANT_OPTIONS = [
 ]
 
 export default function ModelsView({ onBack }) {
-  const { gpuInfo, loadedModel, setLoadedModel, localModels, loadLocalModels, loadSystemStatus } = useApp()
+  const { gpuInfo, loadedModel, setLoadedModel, assistantModel, setAssistantModel, localModels, loadLocalModels, loadSystemStatus } = useApp()
   const { toast } = useToast()
   
   const [searchQuery, setSearchQuery] = useState('')
@@ -34,6 +34,7 @@ export default function ModelsView({ onBack }) {
   const [selectedQuants, setSelectedQuants] = useState(['original']) // Array of selected quantizations
   const [keepCache, setKeepCache] = useState(false)
   const [loadingModel, setLoadingModel] = useState(null)
+  const [loadingAssistant, setLoadingAssistant] = useState(null)
   const [loadQuantSelections, setLoadQuantSelections] = useState({})
   
   // Voice models state
@@ -243,6 +244,36 @@ export default function ModelsView({ onBack }) {
     }
   }
 
+  // Assistant model handlers for speculative decoding
+  const handleLoadAssistant = async (model) => {
+    const modelKey = getModelKey(model)
+    const requestedQuant = getLoadQuantization(model)
+    const loadQuant = requestedQuant === 'original' ? null : requestedQuant
+    setLoadingAssistant(modelKey)
+    try {
+      const result = await modelsAPI.loadAssistantModel(model.model_id, loadQuant)
+      const loadedKey = result?.quantization ? `${result.model_id}__${result.quantization}` : result?.model_id
+      setAssistantModel(loadedKey || modelKey)
+      toast.success(`Assistant model loaded: ${model.model_id.split('/').pop()} (${result?.quantization || 'original'})`)
+      loadSystemStatus()
+    } catch (error) {
+      toast.error('Failed to load assistant: ' + error.message)
+    } finally {
+      setLoadingAssistant(null)
+    }
+  }
+
+  const handleUnloadAssistant = async () => {
+    try {
+      await modelsAPI.unloadAssistantModel()
+      setAssistantModel(null)
+      toast.success('Assistant model unloaded')
+      loadSystemStatus()
+    } catch (error) {
+      toast.error('Failed to unload assistant: ' + error.message)
+    }
+  }
+
   const handleDelete = async (model) => {
     if (!confirm(`Delete ${model.model_id}?`)) return
     
@@ -354,6 +385,132 @@ export default function ModelsView({ onBack }) {
                 )}
               </div>
             </div>
+          </div>
+
+          {/* Speculative Decoding (Assistant Model) */}
+          <div className="p-5 bg-white/5 border border-white/10 rounded-xl">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-xl bg-blue-500/20 flex items-center justify-center">
+                <Zap className="w-5 h-5 text-blue-400" />
+              </div>
+              <div>
+                <h3 className="text-xs font-black text-white">Speculative Decoding</h3>
+                <p className="text-[10px] text-neutral-500">Load a smaller draft model for faster generation</p>
+              </div>
+            </div>
+            
+            {/* Current Assistant Model Status */}
+            <div className="p-3 bg-white/5 rounded-lg mb-4">
+              <div className="flex items-center gap-2 mb-1">
+                <Zap className="w-3.5 h-3.5 text-neutral-500" />
+                <span className="text-[10px] text-neutral-500 uppercase tracking-wide">Draft Model</span>
+              </div>
+              {assistantModel ? (
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-medium text-blue-400 truncate flex-1">
+                    {assistantModel.split('__')[0].split('/').pop()}
+                  </span>
+                  <button
+                    onClick={handleUnloadAssistant}
+                    className="p-1 rounded hover:bg-red-500/20 text-red-400 transition-colors"
+                    title="Unload assistant model"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              ) : (
+                <span className="text-xs text-neutral-500 italic">No draft model loaded</span>
+              )}
+            </div>
+            
+            {/* Info about speculative decoding */}
+            <div className="mb-4 p-3 bg-blue-500/5 border border-blue-500/10 rounded-lg">
+              <p className="text-[10px] text-blue-300/80">
+                💡 Speculative decoding uses a small "draft" model to predict tokens, which the main model then verifies in parallel. 
+                This can speed up generation by 1.5-2x. Choose a smaller model from the same family (e.g., Qwen 0.6B for Qwen 8B).
+              </p>
+            </div>
+            
+            {/* List of models to use as assistant */}
+            {loadedModel ? (
+              <div className="space-y-2">
+                <h4 className="text-[10px] text-neutral-500 uppercase tracking-wide mb-2">Select Draft Model</h4>
+                {localModels.filter(m => getModelKey(m) !== loadedModel).length === 0 ? (
+                  <p className="text-xs text-neutral-500 italic">No other models available. Download a smaller model to use as a draft.</p>
+                ) : (
+                  localModels.filter(m => getModelKey(m) !== loadedModel).map(model => {
+                    const modelKey = getModelKey(model)
+                    const isLoaded = assistantModel === modelKey
+                    const isLoading = loadingAssistant === modelKey
+                    const shortName = model.model_id.split('/').pop()
+                    
+                    return (
+                      <div
+                        key={`assistant-${modelKey}`}
+                        className={`flex items-center justify-between p-3 rounded-lg transition-all ${
+                          isLoaded ? 'bg-blue-500/10 border border-blue-500/20' : 'bg-neutral-900/30'
+                        }`}
+                      >
+                        <div className="flex items-center gap-3 flex-1 min-w-0">
+                          {isLoading ? (
+                            <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
+                          ) : isLoaded ? (
+                            <Check className="w-4 h-4 text-blue-400" />
+                          ) : (
+                            <Box className="w-4 h-4 text-neutral-500" />
+                          )}
+                          <div className="min-w-0">
+                            <div className={`text-xs font-medium truncate ${isLoaded ? 'text-blue-400' : 'text-white'}`}>
+                              {shortName}
+                            </div>
+                            <div className="flex items-center gap-2 text-[10px] text-neutral-500">
+                              <span className="px-1 py-0.5 bg-white/5 rounded">{model.quantization || 'original'}</span>
+                              <span>{model.size_formatted}</span>
+                            </div>
+                          </div>
+                        </div>
+                        
+                        {!isLoaded && (
+                          <div className="flex items-center gap-2">
+                            <select
+                              value={getLoadQuantization(model)}
+                              onChange={(e) => setLoadQuantization(model, e.target.value)}
+                              disabled={!!model.quantization}
+                              className="bg-neutral-800 border border-white/10 rounded px-2 py-1 text-[10px] text-neutral-200
+                                         focus:outline-none focus:border-blue-500/50 disabled:opacity-60"
+                            >
+                              {(model.quantization ? [
+                                { value: model.quantization, label: model.quantization }
+                              ] : LOAD_QUANT_OPTIONS).map(opt => (
+                                <option key={opt.value} value={opt.value}>
+                                  {opt.label}
+                                </option>
+                              ))}
+                            </select>
+                            <button
+                              onClick={() => handleLoadAssistant(model)}
+                              disabled={isLoading || loadingAssistant !== null}
+                              className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-500/20 hover:bg-blue-500/30
+                                         text-blue-400 text-xs font-medium rounded-lg transition-colors
+                                         disabled:opacity-50"
+                            >
+                              {isLoading ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Zap className="w-3.5 h-3.5" />
+                              )}
+                              {isLoading ? 'Loading...' : 'Load'}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })
+                )}
+              </div>
+            ) : (
+              <p className="text-xs text-neutral-500 italic">Load a main model first to enable speculative decoding.</p>
+            )}
           </div>
 
           {/* Search HuggingFace */}

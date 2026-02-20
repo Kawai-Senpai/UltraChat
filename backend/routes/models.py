@@ -31,6 +31,12 @@ class ModelLoadRequest(BaseModel):
     quantization: Optional[str] = None
 
 
+class AssistantModelLoadRequest(BaseModel):
+    """Request to load an assistant model for speculative decoding."""
+    model_id: str
+    quantization: Optional[str] = None
+
+
 class ModelDeleteRequest(BaseModel):
     """Request to delete a model."""
     model_id: str
@@ -217,3 +223,35 @@ async def get_recent(limit: int = 5):
     service = get_model_service()
     recent = await service.get_recent(limit)
     return {"models": recent}
+
+
+# ============================================
+# Assistant Model (Speculative Decoding)
+# ============================================
+
+@router.get("/assistant/status")
+async def get_assistant_status():
+    """Get status of the assistant model for speculative decoding."""
+    service = get_model_service()
+    status = await service.get_assistant_status()
+    return status
+
+
+@router.post("/assistant/load")
+async def load_assistant_model(request: AssistantModelLoadRequest):
+    """Load an assistant model for speculative decoding."""
+    service = get_model_service()
+    result = await service.load_assistant_model(request.model_id, request.quantization)
+    
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error"))
+    
+    return result
+
+
+@router.post("/assistant/unload")
+async def unload_assistant_model():
+    """Unload the assistant model."""
+    service = get_model_service()
+    result = await service.unload_assistant_model()
+    return result

@@ -41,3 +41,11 @@ MODEL_DOWNLOAD_TIMEOUT = 7200  # 2 hours max for model downloads
 # Memory
 MAX_MEMORY_ITEMS = 1000
 MEMORY_RELEVANCE_THRESHOLD = 0.5
+
+# Speculative Decoding Defaults
+DEFAULT_NUM_ASSISTANT_TOKENS = 4  # K value: how many tokens draft model proposes per step
+DEFAULT_ASSISTANT_TOKENS_SCHEDULE = "heuristic"  # "constant" or "heuristic" (auto-adjusts K)
+DEFAULT_SPECULATIVE_ENABLED = True  # Enable speculative decoding when assistant model is loaded
+
+# Attention Implementation Defaults
+DEFAULT_ATTENTION_IMPLEMENTATION = "auto"  # "auto", "flash_attention_2", "sdpa", "eager"

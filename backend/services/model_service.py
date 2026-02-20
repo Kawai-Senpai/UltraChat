@@ -14,6 +14,7 @@ from ..core import (
     create_done_event,
     create_error_event,
     create_status_event,
+    FLASH_ATTN_AVAILABLE,
 )
 from ..models import ModelRegistry
 
@@ -85,9 +86,12 @@ class ModelService:
             "gpu_memory_free": format_size(gpu_info.get("memory_free", 0)) if gpu_info.get("available") else None,
             "current_model": self.manager.current_model,
             "is_model_loaded": self.manager.is_model_loaded,
+            "current_assistant_model": self.manager.current_assistant_model,
+            "is_assistant_model_loaded": self.manager.is_assistant_model_loaded,
             "device": self.manager.device,
             "pytorch_version": torch.__version__,
             "cuda_version": torch.version.cuda if torch.cuda.is_available() else None,
+            "flash_attn_available": FLASH_ATTN_AVAILABLE,
         }
     
     async def search_models(
@@ -419,6 +423,58 @@ class ModelService:
             return {"success": True, "message": "Model unloaded"}
         except Exception as e:
             return {"success": False, "error": str(e)}
+    
+    async def load_assistant_model(
+        self,
+        model_id: str,
+        quantization: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Load an assistant model for speculative decoding."""
+        try:
+            normalized_quant = normalize_quantization_value(quantization)
+            print(f"🔄 Loading assistant model {model_id} with quantization {normalized_quant}...")
+            success = await self.manager.load_assistant_model(model_id, normalized_quant)
+            print(f"   Assistant load result: {success}")
+            
+            if success:
+                print(f"✅ Assistant model loaded successfully!")
+                return {
+                    "success": True,
+                    "message": f"Assistant model '{model_id}' loaded for speculative decoding",
+                    "model_id": model_id,
+                    "quantization": normalized_quant,
+                    "device": self.manager.device
+                }
+            else:
+                print(f"❌ Assistant load returned False")
+                return {"success": False, "error": "Failed to load assistant model"}
+                
+        except ModelNotFoundError as e:
+            print(f"❌ Assistant model not found: {e}")
+            return {"success": False, "error": str(e)}
+        except ModelError as e:
+            print(f"❌ Assistant model error: {e}")
+            return {"success": False, "error": str(e)}
+        except Exception as e:
+            print(f"❌ Unexpected error loading assistant: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"success": False, "error": str(e)}
+    
+    async def unload_assistant_model(self) -> Dict[str, Any]:
+        """Unload the assistant model from memory."""
+        try:
+            self.manager.unload_assistant_model()
+            return {"success": True, "message": "Assistant model unloaded"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    async def get_assistant_status(self) -> Dict[str, Any]:
+        """Get info about the currently loaded assistant model."""
+        return {
+            "is_loaded": self.manager.is_assistant_model_loaded,
+            "model_id": self.manager.current_assistant_model,
+        }
     
     async def get_loaded_model(self) -> Optional[Dict[str, Any]]:
         """Get info about the currently loaded model."""

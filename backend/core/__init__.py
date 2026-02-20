@@ -15,6 +15,7 @@ from .hf_model_manager import (
     get_model_manager,
     close_model_manager,
     get_quantization_config,
+    FLASH_ATTN_AVAILABLE,
 )
 
 from .streaming import (
@@ -50,6 +51,7 @@ __all__ = [
     "get_model_manager",
     "close_model_manager",
     "get_quantization_config",
+    "FLASH_ATTN_AVAILABLE",
     "StreamEventType",
     "StreamEvent",
     "create_token_event",

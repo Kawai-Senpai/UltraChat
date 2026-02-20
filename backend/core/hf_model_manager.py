@@ -25,6 +25,57 @@ from concurrent.futures import ThreadPoolExecutor
 # Disable HuggingFace cache - we control where models go
 os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
 
+# ============================================
+# Flash Attention Detection (before importing transformers!)
+# ============================================
+
+def _check_flash_attn_works() -> bool:
+    """Test if flash_attn is fully functional (not just importable).
+    
+    Checks: import, __spec__, actual function import, and runs a tiny 
+    forward pass to catch incompatible CUDA/GPU arch issues.
+    """
+    try:
+        import flash_attn
+        # Check that __spec__ is valid (common issue on Windows)
+        if flash_attn.__spec__ is None:
+            return False
+        # Try importing actual function
+        from flash_attn import flash_attn_func  # noqa
+        
+        # Actually test it works on current GPU with a tiny tensor
+        import torch
+        if not torch.cuda.is_available():
+            return False
+        
+        device = torch.device("cuda:0")
+        # Minimal shapes: batch=1, seqlen=1, heads=1, headdim=32 (minimum for FA2)
+        q = torch.randn(1, 1, 1, 32, dtype=torch.float16, device=device)
+        k = torch.randn(1, 1, 1, 32, dtype=torch.float16, device=device)
+        v = torch.randn(1, 1, 1, 32, dtype=torch.float16, device=device)
+        _ = flash_attn_func(q, k, v)
+        
+        # Cleanup test tensors
+        del q, k, v, _
+        torch.cuda.empty_cache()
+        return True
+    except (ImportError, ModuleNotFoundError, ValueError, AttributeError):
+        return False
+    except Exception:
+        # Catches CUDA errors, arch mismatches, runtime failures, etc.
+        try:
+            import torch
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+        return False
+
+FLASH_ATTN_AVAILABLE = _check_flash_attn_works()
+
+# If flash_attn is broken, tell transformers not to use it
+if not FLASH_ATTN_AVAILABLE:
+    os.environ["TRANSFORMERS_NO_FLASH_ATTN"] = "1"
+
 import torch
 from transformers import (
     AutoConfig,
@@ -261,6 +312,13 @@ class HFModelManager:
         self._loaded_tokenizer: Optional[Any] = None
         self._loaded_model_id: Optional[str] = None
         self._loaded_quantization: Optional[str] = None
+        
+        # Assistant model for speculative decoding
+        self._loaded_assistant_model: Optional[Any] = None
+        self._loaded_assistant_tokenizer: Optional[Any] = None
+        self._loaded_assistant_model_id: Optional[str] = None
+        self._loaded_assistant_quantization: Optional[str] = None
+        
         self._hf_api = HfApi()
         self._executor = ThreadPoolExecutor(max_workers=2)
         self._generation_lock = threading.Lock()
@@ -1023,67 +1081,129 @@ class HFModelManager:
                 self._loaded_tokenizer.pad_token = self._loaded_tokenizer.eos_token
             
             # Use effective quantization (from marker or parameter)
-            logger.info(f"🔧 Loading model with {effective_quant or 'fp32'} precision...")
-            
             # Determine compute dtype (bfloat16 if supported, otherwise float16)
             compute_dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
             
-            def build_load_kwargs(allow_offload: bool = False):
-                """Build kwargs for model loading."""
+            logger.info(f"🔧 Loading model with {effective_quant or compute_dtype} precision...")
+            
+            # Get attention implementation from settings
+            settings_mgr = get_settings_manager()
+            attn_setting = settings_mgr.get("model.attention_implementation", "auto")
+            
+            # Resolve "auto" to the best available implementation
+            if attn_setting == "auto":
+                if FLASH_ATTN_AVAILABLE:
+                    attn_impl = "flash_attention_2"
+                    logger.info("⚡ Using Flash Attention 2 (auto-detected)")
+                else:
+                    attn_impl = "sdpa"
+                    logger.info("🔧 Using SDPA attention (flash_attn not available)")
+            else:
+                attn_impl = attn_setting
+                if attn_impl == "flash_attention_2" and not FLASH_ATTN_AVAILABLE:
+                    logger.warning("⚠️ Flash Attention requested but not available, falling back to SDPA")
+                    attn_impl = "sdpa"
+            
+            def is_oom_error(error: Exception) -> bool:
+                """Check if error is out of memory."""
+                msg = str(error).lower()
+                return "out of memory" in msg or ("cuda" in msg and "memory" in msg)
+            
+            def is_flash_attn_error(error: Exception) -> bool:
+                """Check if error is related to Flash Attention failure."""
+                msg = str(error).lower()
+                return any(kw in msg for kw in [
+                    "flash_attn", "flash attention", "flash-attn",
+                    "flash_attn_func", "flash_attn_varlen",
+                    "flash_attn_2", "fa2",
+                ])
+            
+            def _attempt_load(use_attn_impl: str, allow_offload: bool):
+                """Attempt to load the model with given attention impl and offload setting."""
                 kwargs = {
                     "trust_remote_code": True,
                     "torch_dtype": "auto",
                     "low_cpu_mem_usage": True,
-                    "attn_implementation": "sdpa",  # Scaled Dot Product Attention (faster on all GPUs)
+                    "attn_implementation": use_attn_impl,
                 }
 
                 if config is not None:
                     kwargs["config"] = config
                 
-                # Use GPU-only device map first, like the working Qwen LoRa code
                 if allow_offload:
-                    # Use auto device map with offloading
                     kwargs["device_map"] = "auto"
                 else:
-                    # Load everything to GPU 0 (no meta tensors)
                     kwargs["device_map"] = {"": 0}
                 
-                # For 4bit/8bit, ALWAYS pass quantization_config
                 if effective_quant in ("4bit", "8bit"):
                     quant_config = get_quantization_config(effective_quant, allow_cpu_offload=allow_offload)
                     kwargs["quantization_config"] = quant_config
                 elif effective_quant == "fp16":
                     kwargs["torch_dtype"] = torch.float16
-                elif effective_quant == "fp32" or effective_quant is None:
+                elif effective_quant == "fp32":
                     kwargs["torch_dtype"] = torch.float32
+                    if use_attn_impl == "flash_attention_2":
+                        logger.warning("⚠️ Flash Attention 2 is incompatible with fp32. Switching to SDPA.")
+                        kwargs["attn_implementation"] = "sdpa"
+                elif effective_quant is None:
+                    kwargs["torch_dtype"] = compute_dtype
+                    logger.info(f"   Using {compute_dtype} precision (auto)")
                 
-                return kwargs
+                return AutoModelForCausalLM.from_pretrained(
+                    str(local_path),
+                    **kwargs
+                )
             
-            def is_oom_error(error: Exception) -> bool:
-                """Check if error is out of memory."""
-                msg = str(error).lower()
-                return "out of memory" in msg or "cuda" in msg and "memory" in msg
+            def _cleanup_gpu():
+                """Aggressively free GPU memory."""
+                if hasattr(self, '_loaded_model') and self._loaded_model is not None:
+                    try:
+                        self._loaded_model.cpu()
+                    except Exception:
+                        pass
+                    del self._loaded_model
+                    self._loaded_model = None
+                gc.collect()
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                time.sleep(0.5)
             
             # Try GPU-only first (no meta tensors), fallback to offload if OOM
+            # Outer try: catch FA2 runtime errors and retry with SDPA
+            current_attn = attn_impl
             try:
-                logger.info(f"   🎯 Attempting GPU-only load...")
-                load_kwargs = build_load_kwargs(allow_offload=False)
-                self._loaded_model = AutoModelForCausalLM.from_pretrained(
-                    str(local_path),
-                    **load_kwargs
-                )
-            except (RuntimeError, ValueError) as e:
-                if is_oom_error(e):
-                    logger.warning(f"   ⚠️ GPU-only load failed (OOM). Falling back to CPU offload...")
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+                try:
+                    logger.info(f"   🎯 Attempting GPU-only load...")
+                    self._loaded_model = _attempt_load(current_attn, allow_offload=False)
+                except (RuntimeError, ValueError, torch.OutOfMemoryError) as e:
+                    if is_oom_error(e):
+                        logger.warning(f"   ⚠️ GPU-only load failed (OOM). Falling back to CPU offload...")
+                        del e
+                        _cleanup_gpu()
+                        self._loaded_model = _attempt_load(current_attn, allow_offload=True)
+                    else:
+                        raise
+            except Exception as e:
+                if current_attn == "flash_attention_2" and is_flash_attn_error(e):
+                    logger.warning(f"⚠️ Flash Attention 2 failed at runtime: {e}")
+                    logger.warning("⚠️ Falling back to SDPA attention. Your flash_attn installation may be incompatible.")
+                    current_attn = "sdpa"
+                    del e
+                    _cleanup_gpu()
                     
-                    load_kwargs = build_load_kwargs(allow_offload=True)
-                    self._loaded_model = AutoModelForCausalLM.from_pretrained(
-                        str(local_path),
-                        **load_kwargs
-                    )
+                    try:
+                        logger.info(f"   🎯 Retrying load with SDPA attention...")
+                        self._loaded_model = _attempt_load(current_attn, allow_offload=False)
+                    except (RuntimeError, ValueError, torch.OutOfMemoryError) as e2:
+                        if is_oom_error(e2):
+                            logger.warning(f"   ⚠️ GPU-only load failed (OOM). Falling back to CPU offload...")
+                            del e2
+                            _cleanup_gpu()
+                            self._loaded_model = _attempt_load(current_attn, allow_offload=True)
+                        else:
+                            raise
                 else:
                     raise
             
@@ -1138,6 +1258,159 @@ class HFModelManager:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+    def unload_assistant_model(self):
+        """Unload the assistant model used for speculative decoding."""
+        if self._loaded_assistant_model is not None:
+            del self._loaded_assistant_model
+            self._loaded_assistant_model = None
+        
+        if self._loaded_assistant_tokenizer is not None:
+            del self._loaded_assistant_tokenizer
+            self._loaded_assistant_tokenizer = None
+        
+        self._loaded_assistant_model_id = None
+        self._loaded_assistant_quantization = None
+        
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        logger.info("🗑️ Assistant model unloaded")
+
+    async def load_assistant_model(
+        self,
+        model_id: str,
+        quantization: Optional[str] = None,
+    ) -> bool:
+        """
+        Load an assistant model for speculative decoding.
+        The assistant model should be a smaller, faster model from the same family.
+        """
+        # Check if already loaded
+        if (self._loaded_assistant_model_id == model_id and 
+            self._loaded_assistant_quantization == quantization and
+            self._loaded_assistant_model is not None):
+            return True
+        
+        def _load():
+            # Unload current assistant model first
+            self.unload_assistant_model()
+            
+            # Resolve requested quantization and paths
+            requested_quant = normalize_quantization(quantization)
+            base_path = self._get_model_local_path(model_id, None)
+            local_path = self._get_model_local_path(model_id, requested_quant)
+
+            if requested_quant is None:
+                if not base_path.exists():
+                    raise ModelNotFoundError(
+                        f"Assistant model not found locally: {model_id}. Download it first."
+                    )
+                local_path = base_path
+            else:
+                if not (local_path.exists() and self._is_valid_model_dir(local_path)):
+                    if base_path.exists() and self._is_valid_model_dir(base_path):
+                        logger.info(
+                            f"⚙️ Using original weights for on-the-fly {requested_quant} quantization (assistant)."
+                        )
+                        local_path = base_path
+                    else:
+                        raise ModelNotFoundError(
+                            f"Assistant model not found locally: {model_id}. Download it first."
+                        )
+
+            marker_quant = self._get_quantization_from_marker(local_path)
+            effective_quant = marker_quant or requested_quant
+
+            logger.info(f"📦 Loading assistant tokenizer for {model_id}...")
+            
+            # Load tokenizer
+            self._loaded_assistant_tokenizer = AutoTokenizer.from_pretrained(
+                str(local_path),
+                trust_remote_code=True,
+            )
+            
+            if self._loaded_assistant_tokenizer.pad_token is None:
+                self._loaded_assistant_tokenizer.pad_token = self._loaded_assistant_tokenizer.eos_token
+            
+            # Determine compute dtype for assistant model (match main model dtype)
+            compute_dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
+            
+            logger.info(f"🔧 Loading assistant model with {effective_quant or compute_dtype} precision...")
+            
+            # Get attention implementation from settings (same as main model)
+            settings_mgr = get_settings_manager()
+            attn_setting = settings_mgr.get("model.attention_implementation", "auto")
+            if attn_setting == "auto":
+                attn_impl = "flash_attention_2" if FLASH_ATTN_AVAILABLE else "sdpa"
+            else:
+                attn_impl = attn_setting
+                if attn_impl == "flash_attention_2" and not FLASH_ATTN_AVAILABLE:
+                    attn_impl = "sdpa"
+            
+            # Build load kwargs similar to main model but simpler
+            def _build_assistant_kwargs(use_attn: str):
+                kwargs = {
+                    "trust_remote_code": True,
+                    "torch_dtype": "auto",
+                    "low_cpu_mem_usage": True,
+                    "device_map": {"": 0},  # Load to GPU
+                    "attn_implementation": use_attn,
+                }
+                
+                if effective_quant in ("4bit", "8bit"):
+                    quant_config = get_quantization_config(effective_quant, allow_cpu_offload=False)
+                    kwargs["quantization_config"] = quant_config
+                elif effective_quant == "fp16":
+                    kwargs["torch_dtype"] = torch.float16
+                elif effective_quant == "fp32":
+                    kwargs["torch_dtype"] = torch.float32
+                    if use_attn == "flash_attention_2":
+                        logger.warning("⚠️ Flash Attention 2 is incompatible with fp32. Switching to SDPA for assistant model.")
+                        kwargs["attn_implementation"] = "sdpa"
+                elif effective_quant is None:
+                    kwargs["torch_dtype"] = compute_dtype
+                return kwargs
+            
+            # Try loading with FA2, fallback to SDPA if it fails at runtime
+            current_attn = attn_impl
+            try:
+                load_kwargs = _build_assistant_kwargs(current_attn)
+                self._loaded_assistant_model = AutoModelForCausalLM.from_pretrained(
+                    str(local_path),
+                    **load_kwargs
+                )
+            except Exception as e:
+                msg = str(e).lower()
+                is_fa_error = current_attn == "flash_attention_2" and any(
+                    kw in msg for kw in ["flash_attn", "flash attention", "flash-attn"]
+                )
+                if is_fa_error:
+                    logger.warning(f"⚠️ Flash Attention 2 failed for assistant model: {e}")
+                    logger.warning("⚠️ Falling back to SDPA attention for assistant model.")
+                    current_attn = "sdpa"
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    
+                    load_kwargs = _build_assistant_kwargs(current_attn)
+                    self._loaded_assistant_model = AutoModelForCausalLM.from_pretrained(
+                        str(local_path),
+                        **load_kwargs
+                    )
+                else:
+                    raise
+            self._loaded_assistant_model.eval()
+            
+            self._loaded_assistant_model_id = model_id
+            self._loaded_assistant_quantization = effective_quant
+            
+            logger.info(f"✅ Assistant model loaded: {model_id} ({effective_quant or 'original'})")
+            return True
+        
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self._executor, _load)
+
     def request_stop(self):
         """Request generation stop for the current model."""
         self._stop_event.set()
@@ -1156,6 +1429,20 @@ class HFModelManager:
     def is_model_loaded(self) -> bool:
         """Check if a model is currently loaded."""
         return self._loaded_model is not None
+
+    @property
+    def current_assistant_model(self) -> Optional[str]:
+        """Get currently loaded assistant model ID with quantization suffix."""
+        if self._loaded_assistant_model_id is None:
+            return None
+        if self._loaded_assistant_quantization:
+            return f"{self._loaded_assistant_model_id}__{self._loaded_assistant_quantization}"
+        return self._loaded_assistant_model_id
+    
+    @property
+    def is_assistant_model_loaded(self) -> bool:
+        """Check if an assistant model is loaded for speculative decoding."""
+        return self._loaded_assistant_model is not None
 
     # ============================================
     # Session KV Cache
@@ -1376,11 +1663,17 @@ class HFModelManager:
         cache_key: Optional[str] = None,
         cache_state: Optional[Dict[str, Any]] = None,
         use_session_cache: bool = False,
+        use_speculative: bool = True,
+        num_assistant_tokens: int = 4,
     ) -> AsyncGenerator[str, None]:
         """
         Generate text with streaming.
         
         Yields tokens as they're generated.
+        
+        Args:
+            use_speculative: If True and assistant model is loaded, use speculative decoding
+            num_assistant_tokens: Number of tokens the assistant proposes per step (K value)
         """
         if not self.is_model_loaded:
             raise ModelError("No model loaded. Load a model first.")
@@ -1466,6 +1759,12 @@ class HFModelManager:
                         "output_hidden_states": False,
                         "output_attentions": False,
                     }
+                    
+                    # Speculative decoding with assistant model
+                    if use_speculative and self._loaded_assistant_model is not None:
+                        gen_kwargs["assistant_model"] = self._loaded_assistant_model
+                        gen_kwargs["num_assistant_tokens"] = num_assistant_tokens
+                        logger.debug(f"🚀 Using speculative decoding with K={num_assistant_tokens}")
 
                     if past_key_values is not None:
                         gen_kwargs["past_key_values"] = past_key_values

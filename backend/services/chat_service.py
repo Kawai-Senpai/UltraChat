@@ -379,6 +379,11 @@ class ChatService:
 
             if not enabled_tools:
                 # No tools: stream directly to user
+                # Get speculative decoding settings
+                spec_settings = self.settings.get("speculative_decoding", {})
+                use_speculative = spec_settings.get("enabled", True)
+                num_assistant_tokens = spec_settings.get("num_assistant_tokens", 4)
+                
                 async for token in self.manager.generate(
                     prompt=prompt,
                     max_new_tokens=gen_options.get('max_new_tokens', 2048),
@@ -390,6 +395,8 @@ class ChatService:
                     cache_key=conversation_id if use_session_cache else None,
                     cache_state=cache_state,
                     use_session_cache=use_session_cache,
+                    use_speculative=use_speculative,
+                    num_assistant_tokens=num_assistant_tokens,
                 ):
                     buffer.add_token(token)
                     tokens_generated += 1
@@ -423,6 +430,8 @@ class ChatService:
                     in_tool_call = False
                     tool_call_closed = False
                     
+                    # Note: For agentic tool loop, we disable speculative decoding
+                    # as the prompts change frequently and KV cache cannot be reused
                     async for token in self.manager.generate(
                         prompt=agent_prompt,
                         max_new_tokens=gen_options.get('max_new_tokens', 2048),
@@ -431,6 +440,7 @@ class ChatService:
                         top_k=gen_options.get('top_k', 50),
                         repetition_penalty=gen_options.get('repetition_penalty', 1.1),
                         stream=True,
+                        use_speculative=False,  # Disabled for tool loop
                     ):
                         round_buffer += token
                         tokens_generated += 1
@@ -619,6 +629,11 @@ class ChatService:
                         enable_thinking=enable_thinking
                     )
                     prompt_for_metrics = final_prompt
+                    # Get speculative decoding settings for final answer
+                    spec_settings = self.settings.get("speculative_decoding", {})
+                    use_speculative = spec_settings.get("enabled", True)
+                    num_assistant_tokens = spec_settings.get("num_assistant_tokens", 4)
+                    
                     async for token in self.manager.generate(
                         prompt=final_prompt,
                         max_new_tokens=gen_options.get('max_new_tokens', 2048),
@@ -627,6 +642,8 @@ class ChatService:
                         top_k=gen_options.get('top_k', 50),
                         repetition_penalty=gen_options.get('repetition_penalty', 1.1),
                         stream=True,
+                        use_speculative=use_speculative,
+                        num_assistant_tokens=num_assistant_tokens,
                     ):
                         buffer.add_token(token)
                         tokens_generated += 1

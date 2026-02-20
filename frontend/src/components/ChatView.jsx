@@ -23,6 +23,8 @@ export default function ChatView({ onToggleSidebar }) {
     setIsGenerating,
     loadedModel,
     setLoadedModel,
+    assistantModel,
+    setAssistantModel,
     currentProfile,
     setCurrentConversation,
     loadConversations,
@@ -36,7 +38,9 @@ export default function ChatView({ onToggleSidebar }) {
   const [input, setInput] = useState('')
   const [streamingContent, setStreamingContent] = useState('')
   const [showModelDropdown, setShowModelDropdown] = useState(false)
+  const [showAssistantDropdown, setShowAssistantDropdown] = useState(false)
   const [loadingModelId, setLoadingModelId] = useState(null)
+  const [loadingAssistantId, setLoadingAssistantId] = useState(null)
   const [enableThinking, setEnableThinking] = useState(true)
   const [useWebSearch, setUseWebSearch] = useState(false)
   const [useWikipedia, setUseWikipedia] = useState(false)
@@ -55,6 +59,7 @@ export default function ChatView({ onToggleSidebar }) {
   const inputRef = useRef(null)
   const abortControllerRef = useRef(null)
   const dropdownRef = useRef(null)
+  const assistantDropdownRef = useRef(null)
 
   const LOAD_QUANT_OPTIONS = [
     { value: 'original', label: 'Original' },
@@ -90,6 +95,9 @@ export default function ChatView({ onToggleSidebar }) {
         if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
           setShowModelDropdown(false)
         }
+        if (assistantDropdownRef.current && !assistantDropdownRef.current.contains(event.target)) {
+          setShowAssistantDropdown(false)
+        }
       }, 0)
     }
     document.addEventListener('click', handleClickOutside)
@@ -124,6 +132,39 @@ export default function ChatView({ onToggleSidebar }) {
       toast.error('Failed to load model: ' + error.message)
     } finally {
       setLoadingModelId(null)
+    }
+  }
+
+  // Handle assistant model loading for speculative decoding
+  const handleLoadAssistantModel = async (model) => {
+    const modelKey = getModelKey(model)
+    const requestedQuant = getLoadQuantization(model)
+    const loadQuant = requestedQuant === 'original' ? null : requestedQuant
+    setLoadingAssistantId(modelKey)
+    setShowAssistantDropdown(false)
+    
+    try {
+      const result = await modelsAPI.loadAssistantModel(model.model_id, loadQuant)
+      const loadedKey = result?.quantization ? `${result.model_id}__${result.quantization}` : result?.model_id
+      setAssistantModel(loadedKey || modelKey)
+      toast.success(`Assistant model loaded: ${model.model_id.split('/').pop()} (${result?.quantization || 'original'})`)
+      await loadSystemStatus()
+    } catch (error) {
+      toast.error('Failed to load assistant model: ' + error.message)
+    } finally {
+      setLoadingAssistantId(null)
+    }
+  }
+
+  // Handle assistant model unloading
+  const handleUnloadAssistantModel = async () => {
+    try {
+      await modelsAPI.unloadAssistantModel()
+      setAssistantModel(null)
+      toast.success('Assistant model unloaded')
+      await loadSystemStatus()
+    } catch (error) {
+      toast.error('Failed to unload assistant model: ' + error.message)
     }
   }
 
@@ -612,6 +653,146 @@ export default function ChatView({ onToggleSidebar }) {
                 </div>
               )}
             </div>
+            
+            {/* Assistant Model Dropdown (for Speculative Decoding) - only show when main model is loaded */}
+            {loadedModel && (
+              <div className="relative" ref={assistantDropdownRef}>
+                <button
+                  onClick={() => setShowAssistantDropdown(!showAssistantDropdown)}
+                  disabled={loadingAssistantId !== null}
+                  className={`flex items-center gap-1.5 px-2 py-0.5 rounded-full transition-all cursor-pointer ${
+                    assistantModel 
+                      ? 'bg-blue-500/10 border border-blue-500/20 hover:bg-blue-500/20' 
+                      : 'bg-neutral-500/10 border border-neutral-500/20 hover:bg-neutral-500/20'
+                  }`}
+                  title="Assistant model for speculative decoding (faster generation)"
+                >
+                  {loadingAssistantId ? (
+                    <Loader2 className="w-3 h-3 text-blue-400 animate-spin" />
+                  ) : assistantModel ? (
+                    <Zap className="w-3 h-3 text-blue-400" />
+                  ) : (
+                    <Zap className="w-3 h-3 text-neutral-500" />
+                  )}
+                  <span className={`text-[10px] font-medium truncate max-w-20 ${
+                    assistantModel ? 'text-blue-400' : 'text-neutral-500'
+                  }`}>
+                    {loadingAssistantId ? 'Loading...' : assistantModel ? assistantModel.split('__')[0].split('/').pop() : 'Draft'}
+                  </span>
+                  <ChevronDown className={`w-3 h-3 transition-transform ${
+                    showAssistantDropdown ? 'rotate-180' : ''
+                  } ${assistantModel ? 'text-blue-400' : 'text-neutral-500'}`} />
+                </button>
+                
+                {/* Assistant Dropdown Menu */}
+                {showAssistantDropdown && (
+                  <div 
+                    className="absolute top-full left-0 mt-1 w-64 max-h-72 overflow-y-auto bg-neutral-900 border border-white/10 rounded-lg shadow-2xl z-50 animate-fadeIn"
+                    onMouseDown={(e) => e.stopPropagation()}
+                  >
+                    <div className="px-3 py-2 border-b border-white/10">
+                      <div className="text-[10px] font-bold text-blue-400 uppercase tracking-wide">Speculative Decoding</div>
+                      <p className="text-[9px] text-neutral-500 mt-0.5">Load a smaller draft model for faster generation</p>
+                    </div>
+                    
+                    {/* Unload option if assistant is loaded */}
+                    {assistantModel && (
+                      <button
+                        onClick={handleUnloadAssistantModel}
+                        className="w-full px-3 py-2 text-left hover:bg-red-500/10 border-b border-white/5 transition-colors"
+                      >
+                        <div className="flex items-center gap-2">
+                          <X className="w-4 h-4 text-red-400" />
+                          <span className="text-xs text-red-400">Unload assistant model</span>
+                        </div>
+                      </button>
+                    )}
+                    
+                    {localModels.length === 0 ? (
+                      <div className="p-3 text-center">
+                        <Box className="w-6 h-6 mx-auto mb-2 text-neutral-600" />
+                        <p className="text-[10px] text-neutral-500">No models downloaded</p>
+                      </div>
+                    ) : (
+                      <div className="py-1">
+                        {localModels.map((model) => {
+                          const modelKey = getModelKey(model)
+                          const isLoaded = assistantModel === modelKey
+                          const isLoading = loadingAssistantId === modelKey
+                          const shortName = model.model_id.split('/').pop()
+                          
+                          // Skip showing the currently loaded main model as an option
+                          if (loadedModel === modelKey) return null
+                          
+                          return (
+                            <div
+                              key={`assistant-${modelKey}`}
+                              className={`px-3 py-2.5 transition-all select-none ${
+                                isLoaded 
+                                  ? 'bg-blue-500/10' 
+                                  : isLoading
+                                    ? 'bg-blue-500/10'
+                                    : 'hover:bg-white/5'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2">
+                                {isLoading ? (
+                                  <Loader2 className="w-4 h-4 animate-spin text-blue-400 shrink-0" />
+                                ) : isLoaded ? (
+                                  <Check className="w-4 h-4 text-blue-400 shrink-0" />
+                                ) : (
+                                  <Box className="w-4 h-4 text-neutral-500 shrink-0" />
+                                )}
+                                <div className="flex-1 min-w-0">
+                                  <div className={`text-xs font-medium truncate ${isLoaded ? 'text-blue-400' : 'text-neutral-300'}`}>{shortName}</div>
+                                  <div className="flex items-center gap-2 text-[10px] text-neutral-500">
+                                    <span className="px-1 py-0.5 bg-white/5 rounded">{model.quantization || 'original'}</span>
+                                    <span>{model.size_formatted}</span>
+                                  </div>
+                                </div>
+                              </div>
+                              {!isLoaded && (
+                                <div className="mt-2 flex items-center gap-2 pl-6">
+                                  <select
+                                    value={getLoadQuantization(model)}
+                                    onChange={(e) => {
+                                      e.stopPropagation()
+                                      setLoadQuantization(model, e.target.value)
+                                    }}
+                                    onClick={(e) => e.stopPropagation()}
+                                    disabled={!!model.quantization}
+                                    className="bg-neutral-800 border border-white/10 rounded px-1.5 py-0.5 text-[10px] text-neutral-200
+                                               focus:outline-none focus:border-blue-500/50 disabled:opacity-60"
+                                  >
+                                    {(model.quantization ? [
+                                      { value: model.quantization, label: model.quantization }
+                                    ] : LOAD_QUANT_OPTIONS).map(opt => (
+                                      <option key={opt.value} value={opt.value}>
+                                        {opt.label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      if (!isLoading) handleLoadAssistantModel(model)
+                                    }}
+                                    disabled={isLoading}
+                                    className="px-2 py-0.5 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 text-[10px] font-medium rounded transition-colors disabled:opacity-50"
+                                  >
+                                    {isLoading ? 'Loading...' : 'Load'}
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
             
             {currentProfile && (
               <div className="flex items-center gap-1 px-2 py-0.5 bg-white/5 border border-white/10 rounded-full">

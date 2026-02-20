@@ -260,6 +260,7 @@ class ModelSettingsUpdate(BaseModel):
     default_quantization: Optional[str] = None
     auto_load_last: Optional[bool] = None
     use_torch_compile: Optional[bool] = None
+    attention_implementation: Optional[str] = None  # "auto", "flash_attention_2", "sdpa", "eager"
 
 
 class ChatDefaultsUpdate(BaseModel):
@@ -279,11 +280,18 @@ class UISettingsUpdate(BaseModel):
     code_theme: Optional[str] = None
 
 
+class SpeculativeDecodingSettingsUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    num_assistant_tokens: Optional[int] = Field(None, ge=1, le=20)
+    assistant_tokens_schedule: Optional[str] = None  # "constant" or "heuristic"
+
+
 class SettingsUpdate(BaseModel):
     storage: Optional[StorageSettingsUpdate] = None
     model: Optional[ModelSettingsUpdate] = None
     chat_defaults: Optional[ChatDefaultsUpdate] = None
     ui: Optional[UISettingsUpdate] = None
+    speculative_decoding: Optional[SpeculativeDecodingSettingsUpdate] = None
 
 
 class SettingsResponse(BaseModel):
@@ -293,6 +301,7 @@ class SettingsResponse(BaseModel):
     model: Dict[str, Any]
     chat_defaults: Dict[str, Any]
     ui: Dict[str, Any]
+    speculative_decoding: Optional[Dict[str, Any]] = None
 
 
 # ============ Generic Responses ============
