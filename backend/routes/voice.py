@@ -536,18 +536,50 @@ async def websocket_voice_chat(ws: WebSocket):
     stop_event = asyncio.Event()
     audio_buffer = bytearray()
     audio_chunk_count = 0
+    active_speech_task: Optional[asyncio.Task] = None  # Track current speech processing task
     
     # Initialize VAD
     if voice_manager.is_vad_available:
         logger.info("[VOICE-CHAT] Initializing VAD...")
         voice_manager.init_vad()
     
+    def parse_sse_event(sse_string: str) -> Optional[tuple[str, dict]]:
+        """Parse a multi-line SSE event string into (event_type, data_dict).
+        
+        SSE format:
+          event: token
+          data: {"token": "hello"}
+          
+        Returns (event_type, data_dict) or None if unparseable.
+        """
+        event_type = None
+        data_str = None
+        
+        for line in sse_string.strip().split("\n"):
+            line = line.strip()
+            if line.startswith("event: "):
+                event_type = line[7:].strip()
+            elif line.startswith("data: "):
+                data_str = line[6:]
+            elif line.startswith("id: "):
+                pass  # We don't need the id
+        
+        if data_str is not None:
+            try:
+                data_dict = json.loads(data_str)
+                return (event_type or "unknown", data_dict)
+            except json.JSONDecodeError as e:
+                logger.error(f"[VOICE-CHAT] SSE JSON decode error: {e}, raw: {data_str[:100]}")
+                return None
+        
+        return None
+    
     async def process_speech():
         """Process accumulated speech and generate response."""
         nonlocal audio_buffer, audio_chunk_count
         
         if not audio_buffer:
-            logger.warn("[VOICE-CHAT] No audio buffer to process")
+            logger.warning("[VOICE-CHAT] No audio buffer to process")
             return
         
         logger.info(f"[VOICE-CHAT] Processing speech from {audio_chunk_count} audio chunks, total bytes: {len(audio_buffer)}")
@@ -562,18 +594,22 @@ async def websocket_voice_chat(ws: WebSocket):
         
         user_text = result.get("text", "").strip()
         if not user_text:
-            logger.warn("[VOICE-CHAT] Empty transcription result")
+            logger.warning("[VOICE-CHAT] Empty transcription result")
+            await ws.send_json({"type": "done"})  # Signal done so frontend resets
             return
         
-        logger.info(f"[VOICE-CHAT] ✅ Transcription: '{user_text}'")
+        logger.info(f"[VOICE-CHAT] Transcription: '{user_text}'")
+        print(f"[VOICE-CHAT] Transcription: '{user_text}'")
         await ws.send_json({"type": "transcription", "text": user_text, "final": True})
         
         # Send to LLM
-        logger.info("[VOICE-CHAT] Sending to LLM...")
+        logger.info(f"[VOICE-CHAT] Sending to LLM with conversation_id={config.get('conversation_id')}")
+        print(f"[VOICE-CHAT] Sending to LLM with conversation_id={config.get('conversation_id')}")
         chunker = TokenChunker(
             max_words=voice_manager._settings.chunk_max_words,
             max_wait_s=voice_manager._settings.chunk_max_wait_s,
         )
+        logger.debug(f"[VOICE-CHAT] Chunker: max_words={chunker.max_words}, min_words={chunker.min_words}, max_wait={chunker.max_wait_s}s")
         text_queue = asyncio.Queue()
         token_count = 0
         audio_sent_count = 0
@@ -583,7 +619,7 @@ async def websocket_voice_chat(ws: WebSocket):
             nonlocal token_count
             full_response = ""
             
-            async for event in chat_service.send_message(
+            async for sse_event in chat_service.send_message(
                 conversation_id=config.get("conversation_id"),
                 message=user_text,
                 profile_id=config.get("profile_id"),
@@ -595,51 +631,73 @@ async def websocket_voice_chat(ws: WebSocket):
                     logger.info("[VOICE-CHAT] Stop event set, breaking LLM stream")
                     break
                 
-                # Parse SSE event
-                if event.startswith("data: "):
-                    try:
-                        data = json.loads(event[6:])
-                        event_type = data.get("type")
-                        
-                        if event_type == "token":
-                            token = data.get("content", "")
-                            token_count += 1
-                            full_response += token
-                            
-                            if token_count % 10 == 0:
-                                logger.debug(f"[VOICE-CHAT] LLM token #{token_count}")
-                            
-                            await ws.send_json({"type": "llm_token", "token": token})
-                            
-                            # Chunk for TTS
-                            chunk = chunker.feed(token)
-                            if chunk:
-                                logger.debug(f"[VOICE-CHAT] Text chunk ready: '{chunk[:50]}...'")
-                                await text_queue.put(chunk)
-                        
-                        elif event_type == "done":
-                            logger.info(f"[VOICE-CHAT] LLM done, total tokens: {token_count}, response length: {len(full_response)}")
-                            # Flush remaining text
-                            tail = chunker.flush()
-                            if tail:
-                                logger.debug(f"[VOICE-CHAT] Flushing final chunk: '{tail[:50]}...'")
-                                await text_queue.put(tail)
-                            await text_queue.put(None)  # Sentinel
-                            
-                            # Update conversation ID for future turns
-                            config["conversation_id"] = data.get("conversation_id")
-                        
-                        elif event_type == "error":
-                            logger.error(f"[VOICE-CHAT] LLM error: {data.get('message')}")
-                            await ws.send_json({
-                                "type": "error",
-                                "message": data.get("message", "Unknown error")
-                            })
-                            await text_queue.put(None)
+                # Parse the multi-line SSE event
+                parsed = parse_sse_event(sse_event)
+                if parsed is None:
+                    continue
+                
+                event_type, data = parsed
+                
+                if event_type == "token":
+                    token = data.get("token", "")
+                    if not token:
+                        continue
                     
-                    except json.JSONDecodeError as e:
-                        logger.error(f"[VOICE-CHAT] JSON decode error: {e}")
-                        pass
+                    token_count += 1
+                    full_response += token
+                    
+                    if token_count % 10 == 0:
+                        logger.debug(f"[VOICE-CHAT] LLM token #{token_count}")
+                    
+                    await ws.send_json({"type": "llm_token", "token": token})
+                    
+                    # Chunk for TTS
+                    chunk = chunker.feed(token)
+                    if chunk:
+                        logger.debug(f"[VOICE-CHAT] Text chunk ready: '{chunk[:50]}...'")
+                        await text_queue.put(chunk)
+                
+                elif event_type == "done":
+                    logger.info(f"[VOICE-CHAT] LLM done, total tokens: {token_count}, response length: {len(full_response)}")
+                    # Flush remaining text
+                    tail = chunker.flush()
+                    if tail:
+                        logger.debug(f"[VOICE-CHAT] Flushing final chunk: '{tail[:50]}...'")
+                        await text_queue.put(tail)
+                    await text_queue.put(None)  # Sentinel
+                    
+                    # Update conversation ID for future turns
+                    if data.get("conversation_id"):
+                        config["conversation_id"] = data.get("conversation_id")
+                        logger.info(f"[VOICE-CHAT] Conversation ID updated: {config['conversation_id']}")
+                        print(f"[VOICE-CHAT] Conversation ID updated: {config['conversation_id']}")
+                    else:
+                        logger.warning(f"[VOICE-CHAT] Done event missing conversation_id! Data: {data}")
+                        print(f"[VOICE-CHAT] WARNING: Done event missing conversation_id! Data: {data}")
+                
+                elif event_type == "error":
+                    error_msg = data.get("error", data.get("message", "Unknown error"))
+                    logger.error(f"[VOICE-CHAT] LLM error: {error_msg}")
+                    await ws.send_json({
+                        "type": "error",
+                        "message": error_msg
+                    })
+                    await text_queue.put(None)
+                
+                elif event_type == "status":
+                    # Status events (generating, tool_thinking_delta, etc.) - log but don't process
+                    logger.debug(f"[VOICE-CHAT] LLM status: {data.get('status')}")
+            
+            # Safety: if LLM stream ended without a done event, flush and signal
+            if not stop_event.is_set():
+                tail = chunker.flush()
+                if tail:
+                    await text_queue.put(tail)
+                # Ensure tts_worker gets the sentinel
+                try:
+                    text_queue.put_nowait(None)
+                except asyncio.QueueFull:
+                    pass
         
         async def tts_worker():
             """Process text chunks and stream audio."""
@@ -712,12 +770,31 @@ async def websocket_voice_chat(ws: WebSocket):
                 
                 elif msg_type == "end_speech":
                     logger.info("[VOICE-CHAT] End speech signal received")
-                    await process_speech()
+                    
+                    # Cancel any active speech processing (user interrupted)
+                    if active_speech_task and not active_speech_task.done():
+                        logger.info("[VOICE-CHAT] Cancelling previous speech processing (user interrupted)")
+                        stop_event.set()
+                        voice_manager.stop_tts()
+                        try:
+                            await asyncio.wait_for(active_speech_task, timeout=2.0)
+                        except (asyncio.TimeoutError, asyncio.CancelledError):
+                            active_speech_task.cancel()
+                        stop_event.clear()
+                    
+                    # Run speech processing as a background task so the message loop stays responsive
+                    active_speech_task = asyncio.create_task(process_speech())
                 
                 elif msg_type == "stop":
                     logger.info("[VOICE-CHAT] Stop signal received")
                     stop_event.set()
                     voice_manager.stop_tts()
+                    if active_speech_task and not active_speech_task.done():
+                        try:
+                            await asyncio.wait_for(active_speech_task, timeout=2.0)
+                        except (asyncio.TimeoutError, asyncio.CancelledError):
+                            active_speech_task.cancel()
+                    stop_event.clear()
             
             elif "bytes" in message:
                 # Accumulate audio for STT
@@ -728,23 +805,26 @@ async def websocket_voice_chat(ws: WebSocket):
                 if audio_chunk_count % 10 == 0:
                     logger.debug(f"[VOICE-CHAT] Audio chunk #{audio_chunk_count}, total buffer: {len(audio_buffer)} bytes")
                 
-                # Send partial transcription
-                result = voice_manager.process_audio_chunk(audio_bytes)
-                if result.get("text"):
-                    is_final = result.get("type") == "final"
-                    if is_final:
-                        logger.debug(f"[VOICE-CHAT] Partial transcription (final): '{result.get('text')}'")
-                    await ws.send_json({
-                        "type": "transcription",
-                        "text": result.get("text"),
-                        "final": is_final
-                    })
+                # Send partial transcription (only if not currently processing a response)
+                if not active_speech_task or active_speech_task.done():
+                    result = voice_manager.process_audio_chunk(audio_bytes)
+                    if result.get("text"):
+                        is_final = result.get("type") == "final"
+                        if is_final:
+                            logger.debug(f"[VOICE-CHAT] Partial transcription (final): '{result.get('text')}'")
+                        await ws.send_json({
+                            "type": "transcription",
+                            "text": result.get("text"),
+                            "final": is_final
+                        })
     
     except WebSocketDisconnect:
         logger.info("[VOICE-CHAT] WebSocket disconnected")
     except Exception as e:
-        logger.error(f"[VOICE-CHAT] ❌ Error: {e}", exc_info=True)
+        logger.error(f"[VOICE-CHAT] Error: {e}", exc_info=True)
     finally:
         logger.info("[VOICE-CHAT] Cleaning up...")
         stop_event.set()
+        if active_speech_task and not active_speech_task.done():
+            active_speech_task.cancel()
         logger.info("=" * 60)

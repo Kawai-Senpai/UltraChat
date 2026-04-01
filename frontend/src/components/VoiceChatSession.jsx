@@ -47,6 +47,7 @@ export default function VoiceChatSession({
   const nextPlayTimeRef = useRef(0)
   const gainNodeRef = useRef(null)
   const wsInitializedRef = useRef(false)
+  const activeSourcesRef = useRef([])  // Track playing audio sources for cancellation
   
   // Initialize WebSocket connection
   const initWebSocket = useCallback(async () => {
@@ -223,6 +224,12 @@ export default function VoiceChatSession({
       
       source.connect(gainNodeRef.current)
       
+      // Track for cancellation and auto-remove when done
+      activeSourcesRef.current.push(source)
+      source.onended = () => {
+        activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== source)
+      }
+      
       // Schedule playback
       const startTime = Math.max(audioContextRef.current.currentTime, nextPlayTimeRef.current)
       source.start(startTime)
@@ -256,11 +263,23 @@ export default function VoiceChatSession({
     }
   }, [])
   
+  // Cancel all playing audio (used when user starts speaking)
+  const cancelAudio = useCallback(() => {
+    log.info('Cancelling all playing audio')
+    for (const source of activeSourcesRef.current) {
+      try { source.stop() } catch (e) { /* already stopped */ }
+    }
+    activeSourcesRef.current = []
+    if (audioContextRef.current) {
+      nextPlayTimeRef.current = audioContextRef.current.currentTime
+    }
+  }, [])
+  
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center gap-2 text-xs text-green-400">
         <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-        <span>✅ Voice session active - waiting for voice detection</span>
+        <span>Voice session active - waiting for voice detection</span>
       </div>
       <VADInitializer 
         wsRef={wsRef}
@@ -268,6 +287,7 @@ export default function VoiceChatSession({
         onError={onError}
         onMicLevel={onMicLevel}
         inputDeviceId={inputDeviceId}
+        onCancelAudio={cancelAudio}
       />
     </div>
   )
@@ -277,11 +297,12 @@ export default function VoiceChatSession({
  * VADInitializer - Separate component to properly use the useMicVAD hook
  * Handles Voice Activity Detection initialization and speech callbacks
  */
-function VADInitializer({ wsRef, onStatusChange, onError, onMicLevel, inputDeviceId }) {
+function VADInitializer({ wsRef, onStatusChange, onError, onMicLevel, inputDeviceId, onCancelAudio }) {
   const vadRef = useRef(null)
   const onStatusChangeRef = useRef(onStatusChange)
   const onErrorRef = useRef(onError)
   const onMicLevelRef = useRef(onMicLevel)
+  const onCancelAudioRef = useRef(onCancelAudio)
   const lastMicUpdateRef = useRef(0)
 
   useEffect(() => {
@@ -295,10 +316,16 @@ function VADInitializer({ wsRef, onStatusChange, onError, onMicLevel, inputDevic
   useEffect(() => {
     onMicLevelRef.current = onMicLevel
   }, [onMicLevel])
+
+  useEffect(() => {
+    onCancelAudioRef.current = onCancelAudio
+  }, [onCancelAudio])
   
   // Configure VAD callbacks - these are stable
   const handleSpeechStart = useCallback(() => {
-    vadLog.info('🎤 Speech detected - listening')
+    vadLog.info('Speech detected - cancelling audio and listening')
+    // Stop any playing audio when user starts speaking
+    onCancelAudioRef.current?.()
     onStatusChangeRef.current?.('listening')
   }, [])
   

@@ -73,6 +73,15 @@ if not http_logger.handlers:
     http_logger.addHandler(handler)
 http_logger.setLevel(logging.INFO)
 
+# Voice/WebSocket logging
+voice_logger = logging.getLogger("ultrachat.voice")
+if not voice_logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter("%(asctime)s [VOICE] %(message)s", "%H:%M:%S")
+    handler.setFormatter(formatter)
+    voice_logger.addHandler(handler)
+voice_logger.setLevel(logging.INFO)
+
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):

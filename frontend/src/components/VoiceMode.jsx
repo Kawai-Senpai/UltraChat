@@ -257,6 +257,8 @@ export default function VoiceMode({
   // Callback handlers for VoiceChatSession
   const handleTranscript = (text, isFinal) => {
     if (isFinal) {
+      // New speech recognized - clear previous LLM response to make room
+      setLlmResponse('')
       setFinalTranscript(text)
       setPartialTranscript('')
     } else {
@@ -275,8 +277,9 @@ export default function VoiceMode({
   
   const handleDone = () => {
     setIsGenerating(false)
-    setLlmResponse('')
-    setFinalTranscript('')
+    // Keep llmResponse and finalTranscript visible until next speech starts
+    // They'll be cleared when the next transcription arrives
+    setStatus('ready')
   }
   
   const handleError = (message) => {
@@ -486,7 +489,7 @@ export default function VoiceMode({
             </div>
             
             {/* Transcript display */}
-            <div className="w-full min-h-16 text-center px-4">
+            <div className="w-full min-h-16 max-h-48 overflow-y-auto text-center px-4">
               {!voiceChatActive && !partialTranscript && !finalTranscript && !llmResponse && (
                 <p className="text-zinc-600 text-xs">Transcripts will appear here</p>
               )}
@@ -494,10 +497,24 @@ export default function VoiceMode({
                 <p className="text-zinc-500 italic text-sm">{partialTranscript}</p>
               )}
               {finalTranscript && (
-                <p className="text-white text-sm">{finalTranscript}</p>
+                <p className="text-white text-sm">
+                  <span className="text-zinc-500 text-xs mr-1">You:</span>
+                  {finalTranscript}
+                </p>
+              )}
+              {isGenerating && !llmResponse && (
+                <div className="flex items-center justify-center gap-1.5 mt-2">
+                  <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '0ms' }} />
+                  <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '150ms' }} />
+                  <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+                </div>
               )}
               {llmResponse && (
-                <p className="text-blue-400 mt-2 text-sm">{llmResponse}</p>
+                <p className="text-blue-400 mt-2 text-sm text-left">
+                  <span className="text-zinc-500 text-xs mr-1">AI:</span>
+                  {llmResponse}
+                  {isGenerating && <span className="animate-pulse">|</span>}
+                </p>
               )}
             </div>
             

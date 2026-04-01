@@ -60,8 +60,8 @@ class VoiceSettings:
     voice_prompt_path: Optional[str] = None  # Path to reference audio for cloning
     sample_rate: int = 24000
     vad_aggressiveness: int = 2  # 0-3, higher = more aggressive
-    chunk_max_words: int = 16
-    chunk_max_wait_s: float = 0.7
+    chunk_max_words: int = 120
+    chunk_max_wait_s: float = 3.0
 
 
 @dataclass
@@ -77,18 +77,26 @@ class TokenChunk:
 
 class TokenChunker:
     """
-    Buffers LLM tokens and commits chunks to TTS when boundaries are hit.
+    Buffers LLM tokens and commits chunks to TTS when natural boundaries are hit.
+    
+    Prioritizes breaking at sentence ends (.!?) but only after accumulating
+    enough content for natural speech (min_words). Also handles paragraph 
+    breaks and max limits.
     """
-    _END_RE = re.compile(r"[.!?]\s*$")
+    _SENTENCE_END_RE = re.compile(r'[.!?]["\')]*\s*$')
+    _PARAGRAPH_RE = re.compile(r'\n\s*\n')  # Double newline = paragraph break
     
     def __init__(
         self,
-        max_words: int = 16,
-        max_chars: int = 220,
-        max_wait_s: float = 0.7
+        min_words: int = 15,
+        max_words: int = 120,
+        max_chars: int = 800,
+        max_wait_s: float = 3.0
     ):
         self.buf = ""
-        self.last_commit_t = time.time()
+        self.first_token_t: Optional[float] = None  # Set on first token, not on creation
+        self.last_commit_t: Optional[float] = None
+        self.min_words = min_words
         self.max_words = max_words
         self.max_chars = max_chars
         self.max_wait_s = max_wait_s
@@ -98,14 +106,33 @@ class TokenChunker:
         self.buf += token_text
         now = time.time()
         
+        # Track first token time for timeout calculation
+        if self.first_token_t is None:
+            self.first_token_t = now
+            self.last_commit_t = now
+        
         words = self.buf.strip().split()
-        if (
-            self._END_RE.search(self.buf) or
-            "\n" in self.buf or
-            len(words) >= self.max_words or
-            len(self.buf) >= self.max_chars or
-            (now - self.last_commit_t) >= self.max_wait_s
-        ):
+        word_count = len(words)
+        
+        should_commit = False
+        
+        # Hard limits: always commit
+        if word_count >= self.max_words or len(self.buf) >= self.max_chars:
+            should_commit = True
+        
+        # Sentence boundary: commit if we have enough words for natural speech
+        elif word_count >= self.min_words and self._SENTENCE_END_RE.search(self.buf):
+            should_commit = True
+        
+        # Paragraph break: commit at double newline if we have some content
+        elif word_count >= 3 and self._PARAGRAPH_RE.search(self.buf):
+            should_commit = True
+        
+        # Timeout: commit whatever we have if it's been too long since last commit
+        elif (now - self.last_commit_t) >= self.max_wait_s and word_count >= 2:
+            should_commit = True
+        
+        if should_commit:
             chunk = self.buf.strip()
             self.buf = ""
             self.last_commit_t = now
@@ -117,12 +144,15 @@ class TokenChunker:
         """Flush remaining buffer."""
         chunk = self.buf.strip()
         self.buf = ""
+        self.first_token_t = None
+        self.last_commit_t = None
         return chunk if chunk else None
     
     def reset(self):
         """Clear the buffer."""
         self.buf = ""
-        self.last_commit_t = time.time()
+        self.first_token_t = None
+        self.last_commit_t = None
 
 
 # ============================================
