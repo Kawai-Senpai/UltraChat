@@ -100,7 +100,7 @@ class ProfileModel:
                 top_k=settings.chat_defaults.top_k,
                 max_tokens=settings.chat_defaults.max_tokens,
                 context_length=settings.chat_defaults.context_length,
-                model=settings.ollama.default_model,
+                model=settings.model.default_model,
                 is_default=True
             )
         

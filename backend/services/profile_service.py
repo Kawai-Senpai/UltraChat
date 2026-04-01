@@ -45,7 +45,7 @@ class ProfileService:
             top_k=top_k if top_k is not None else defaults.top_k,
             max_tokens=max_tokens if max_tokens is not None else defaults.max_tokens,
             context_length=context_length if context_length is not None else defaults.context_length,
-            model=model or self.settings.ollama.default_model,
+            model=model or self.settings.model.default_model,
             is_default=is_default
         )
     
