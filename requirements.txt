@@ -64,6 +64,7 @@ protobuf>=3.20.0
 # ============================================
 # STT - Vosk (lightweight offline speech recognition)
 vosk==0.3.45
+pocket-tts==1.1.1
 
 # Pocket TTS - 100M parameter CPU-friendly TTS with voice cloning
 # Install from local folder: pip install -e ./backend/core/pocket_tts
