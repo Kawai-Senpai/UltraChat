@@ -1167,7 +1167,10 @@ function MessageBubble({
   const collapseByDefault = reasoningSettings?.collapse_by_default !== false
   const assistantParts = !isUser ? buildAssistantParts(message, reasoningRegistry, preferredFormatId) : []
   const messageParts = assistantParts.filter(part => part.type !== 'tool_call')
-  const lastAnswerIndex = messageParts.reduce((acc, part, idx) => (part.type === 'answer' ? idx : acc), -1)
+  const reasoningParts = separateBlocks ? messageParts.filter(part => part.type === 'reasoning') : []
+  const answerParts = messageParts.filter(part => part.type === 'answer')
+  const hasStructuredAnswers = answerParts.length > 0
+  const lastAnswerIndex = answerParts.length - 1
   const parsed = !isUser && !separateBlocks
     ? parseReasoningContent({
       raw: message.raw_content || message.content || '',
@@ -1215,7 +1218,7 @@ function MessageBubble({
 
   const handleCopy = async () => {
     const answerText = !isUser
-      ? (parsed?.answer || messageParts[lastAnswerIndex]?.content || message.content || '')
+      ? (parsed?.answer || answerParts[lastAnswerIndex]?.content || message.content || '')
       : message.content
     const toCopy = isUser ? message.content : answerText
     await navigator.clipboard.writeText(toCopy)
@@ -1242,6 +1245,27 @@ function MessageBubble({
         <div className="ml-12 space-y-2">
           {toolTimelineItems.filter(item => item.type === 'call').map((item, index) => (
             <ToolEventBubble key={item.id || `${item.tool}-${index}`} item={item} />
+          ))}
+        </div>
+      )}
+
+      {!isUser && separateBlocks && reasoningParts.length > 0 && (
+        <div className="ml-12 space-y-2">
+          {reasoningParts.map((part, index) => (
+            <div key={`reasoning-${index}`} className="border border-white/10 rounded-lg bg-white/3">
+              <button
+                onClick={() => setShowThinking(prev => !prev)}
+                className="w-full flex items-center justify-between px-3 py-2 text-[10px] text-neutral-400 hover:text-neutral-200"
+              >
+                <span className="font-medium">Thinking</span>
+                <ChevronDown className={`w-3 h-3 transition-transform ${showThinking ? 'rotate-180' : ''}`} />
+              </button>
+              {showThinking && (
+                <div className="px-3 pb-3 text-[11px] text-neutral-300 whitespace-pre-wrap">
+                  {part.content}
+                </div>
+              )}
+            </div>
           ))}
         </div>
       )}
@@ -1301,43 +1325,22 @@ function MessageBubble({
             ) : (
                 separateBlocks ? (
                   <div className="space-y-3">
-                    {(messageParts.length > 0 ? messageParts : [{ type: 'answer', content: message.content }]).map((part, index) => {
-                      if (part.type === 'reasoning') {
-                        return (
-                          <div key={`reasoning-${index}`} className="border border-white/10 rounded-lg bg-white/3">
-                            <button
-                              onClick={() => setShowThinking(prev => !prev)}
-                              className="w-full flex items-center justify-between px-3 py-2 text-[10px] text-neutral-400 hover:text-neutral-200"
-                            >
-                              <span className="font-medium">Thinking</span>
-                              <ChevronDown className={`w-3 h-3 transition-transform ${showThinking ? 'rotate-180' : ''}`} />
-                            </button>
-                            {showThinking && (
-                              <div className="px-3 pb-3 text-[11px] text-neutral-300 whitespace-pre-wrap">
-                                {part.content}
-                              </div>
-                            )}
-                          </div>
-                        )
-                      }
-
-                      return (
-                        <div
-                          key={`answer-${index}`}
-                          className="prose prose-invert max-w-none text-xs prose-li:my-0.5 prose-ul:my-1 prose-ol:my-1 prose-p:my-1.5 prose-headings:my-2"
+                    {(hasStructuredAnswers ? answerParts : [{ type: 'answer', content: message.content }]).map((part, index) => (
+                      <div
+                        key={`answer-${index}`}
+                        className="prose prose-invert max-w-none text-xs prose-li:my-0.5 prose-ul:my-1 prose-ol:my-1 prose-p:my-1.5 prose-headings:my-2"
+                      >
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm, remarkMath]}
+                          rehypePlugins={[rehypeKatex]}
                         >
-                          <ReactMarkdown
-                            remarkPlugins={[remarkGfm, remarkMath]}
-                            rehypePlugins={[rehypeKatex]}
-                          >
-                            {part.content || ''}
-                          </ReactMarkdown>
-                          {isStreaming && index === lastAnswerIndex && (
-                            <span className="inline-block w-2 h-5 bg-red-400 animate-pulse ml-0.5 align-middle" />
-                          )}
-                        </div>
-                      )
-                    })}
+                          {part.content || ''}
+                        </ReactMarkdown>
+                        {isStreaming && ((hasStructuredAnswers && index === lastAnswerIndex) || (!hasStructuredAnswers && index === 0)) && (
+                          <span className="inline-block w-2 h-5 bg-red-400 animate-pulse ml-0.5 align-middle" />
+                        )}
+                      </div>
+                    ))}
                   </div>
                 ) : (
                   <div className="space-y-3">

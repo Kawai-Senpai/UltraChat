@@ -18,6 +18,7 @@ import traceback
 import inspect
 from pathlib import Path
 from fnmatch import fnmatch
+from queue import Empty
 from typing import Optional, Dict, Any, List, AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -576,6 +577,103 @@ class HFModelManager:
                     files_completed=idx,
                     files_total=len(siblings),
                 ))
+
+    def _normalize_extra_special_tokens(self, value: Any) -> Dict[str, Any]:
+        """Normalize extra_special_tokens to the dict shape expected by Transformers."""
+        if isinstance(value, dict):
+            return value
+
+        if isinstance(value, list):
+            normalized: Dict[str, Any] = {}
+            for idx, item in enumerate(value):
+                default_key = f"extra_token_{idx + 1}"
+                if isinstance(item, dict):
+                    key = item.get("name") or item.get("token") or item.get("content") or default_key
+                    normalized[str(key)] = item
+                else:
+                    normalized[default_key] = item
+            return normalized
+
+        return {}
+
+    def _sanitize_tokenizer_metadata(self, model_path: Path) -> bool:
+        """Fix common tokenizer metadata schema mismatches in-place.
+
+        Some model exports store extra_special_tokens as a list, but newer
+        Transformers expects a mapping and crashes while loading.
+        """
+        changed_any = False
+        for filename in ("tokenizer_config.json", "special_tokens_map.json"):
+            path = model_path / filename
+            if not path.exists():
+                continue
+
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+
+            if not isinstance(payload, dict):
+                continue
+
+            value = payload.get("extra_special_tokens", None)
+            if value is None or isinstance(value, dict):
+                continue
+
+            payload["extra_special_tokens"] = self._normalize_extra_special_tokens(value)
+            try:
+                path.write_text(
+                    json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                changed_any = True
+                logger.warning("⚠️ Normalized malformed extra_special_tokens in %s", path)
+            except Exception as write_error:
+                logger.warning("⚠️ Failed to update tokenizer metadata file %s: %s", path, write_error)
+
+        return changed_any
+
+    def _load_tokenizer_safe(self, model_path: Path):
+        """Load tokenizer with recovery for known metadata issues."""
+        try:
+            return AutoTokenizer.from_pretrained(
+                str(model_path),
+                trust_remote_code=True,
+            )
+        except AttributeError as attr_error:
+            err_msg = str(attr_error)
+            is_extra_tokens_shape_error = (
+                "object has no attribute 'keys'" in err_msg
+                or "object has no attribute 'items'" in err_msg
+            )
+            if not is_extra_tokens_shape_error:
+                raise
+
+            logger.warning(
+                "⚠️ Tokenizer load failed due to malformed special token metadata: %s",
+                attr_error,
+            )
+
+            if self._sanitize_tokenizer_metadata(model_path):
+                return AutoTokenizer.from_pretrained(
+                    str(model_path),
+                    trust_remote_code=True,
+                )
+
+            # Last-resort fallback for non-writable paths.
+            return AutoTokenizer.from_pretrained(
+                str(model_path),
+                trust_remote_code=True,
+                extra_special_tokens={},
+            )
+        except Exception:
+            # Retry once after metadata normalization for other tokenizer init failures.
+            if self._sanitize_tokenizer_metadata(model_path):
+                return AutoTokenizer.from_pretrained(
+                    str(model_path),
+                    trust_remote_code=True,
+                )
+            raise
     
     # ============================================
     # Model Discovery
@@ -798,10 +896,7 @@ class HFModelManager:
                                         files_completed=idx,
                                         files_total=len(quantizations),
                                     ))
-                                tokenizer = AutoTokenizer.from_pretrained(
-                                    str(cache_path),
-                                    trust_remote_code=True,
-                                )
+                                tokenizer = self._load_tokenizer_safe(cache_path)
                                 # Set pad token if not set
                                 if tokenizer.pad_token_id is None:
                                     tokenizer.pad_token = tokenizer.eos_token
@@ -937,10 +1032,7 @@ class HFModelManager:
                                 ))
 
                             # Load tokenizer
-                            tokenizer = AutoTokenizer.from_pretrained(
-                                str(cache_path),
-                                trust_remote_code=True,
-                            )
+                            tokenizer = self._load_tokenizer_safe(cache_path)
 
                             # Load model in fp16
                             model = AutoModelForCausalLM.from_pretrained(
@@ -1094,10 +1186,7 @@ class HFModelManager:
                 )
 
                 if quant in ("4bit", "8bit"):
-                    tokenizer = AutoTokenizer.from_pretrained(
-                        str(source_path),
-                        trust_remote_code=True,
-                    )
+                    tokenizer = self._load_tokenizer_safe(source_path)
                     if tokenizer.pad_token_id is None:
                         tokenizer.pad_token = tokenizer.eos_token
 
@@ -1117,10 +1206,7 @@ class HFModelManager:
                     del model
                     del tokenizer
                 elif quant == "fp16":
-                    tokenizer = AutoTokenizer.from_pretrained(
-                        str(source_path),
-                        trust_remote_code=True,
-                    )
+                    tokenizer = self._load_tokenizer_safe(source_path)
                     if tokenizer.pad_token_id is None:
                         tokenizer.pad_token = tokenizer.eos_token
 
@@ -1323,10 +1409,7 @@ class HFModelManager:
             logger.info(f"📦 Loading tokenizer for {model_id}...")
             
             # Load tokenizer
-            self._loaded_tokenizer = AutoTokenizer.from_pretrained(
-                str(local_path),
-                trust_remote_code=True,
-            )
+            self._loaded_tokenizer = self._load_tokenizer_safe(local_path)
             
             # Set pad token if not set
             if self._loaded_tokenizer.pad_token is None:
@@ -1568,6 +1651,17 @@ class HFModelManager:
             except Exception:
                 pass
             torch.cuda.empty_cache()
+            try:
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
+
+        try:
+            torch._dynamo.reset()
+        except Exception:
+            pass
+
+        logger.info("🗑️ Main model unloaded")
 
     def unload_assistant_model(self):
         """Unload the assistant model used for speculative decoding."""
@@ -1649,10 +1743,7 @@ class HFModelManager:
             logger.info(f"📦 Loading assistant tokenizer for {model_id}...")
             
             # Load tokenizer
-            self._loaded_assistant_tokenizer = AutoTokenizer.from_pretrained(
-                str(local_path),
-                trust_remote_code=True,
-            )
+            self._loaded_assistant_tokenizer = self._load_tokenizer_safe(local_path)
             
             if self._loaded_assistant_tokenizer.pad_token is None:
                 self._loaded_assistant_tokenizer.pad_token = self._loaded_assistant_tokenizer.eos_token
@@ -2096,15 +2187,10 @@ class HFModelManager:
 
                     if past_key_values is not None:
                         gen_kwargs["past_key_values"] = past_key_values
-                        if self._supports_cache_position():
-                            past_len = self._get_past_seq_len(past_key_values)
-                            cache_position = torch.arange(
-                                past_len,
-                                past_len + input_ids.shape[1],
-                                device=self.device,
-                                dtype=torch.long,
-                            )
-                            gen_kwargs["cache_position"] = cache_position
+                        # Do not pass cache_position into generate().
+                        # Some Transformers versions call truthiness checks on this field,
+                        # which raises for multi-element tensors: "Boolean value of Tensor is ambiguous".
+                        # The model can infer cache position from past_key_values + input length.
 
                     # Start generation in background thread
                     result_container: Dict[str, Any] = {}
@@ -2126,13 +2212,43 @@ class HFModelManager:
                     thread.start()
 
                     stream_error = None
+                    last_progress_at = time.monotonic()
+                    max_stall_seconds = 45.0
                     try:
-                        for token in streamer:
-                            _emit("token", token)
+                        while True:
+                            try:
+                                token = next(streamer)
+                                last_progress_at = time.monotonic()
+                                _emit("token", token)
+                            except StopIteration:
+                                break
+                            except Empty:
+                                if result_container.get("error") is not None:
+                                    stream_error = result_container["error"]
+                                    break
+
+                                if not thread.is_alive():
+                                    break
+
+                                if (time.monotonic() - last_progress_at) > max_stall_seconds:
+                                    stream_error = TimeoutError(
+                                        "Generation stalled without new tokens. "
+                                        "Try disabling torch.compile and using SDPA attention."
+                                    )
+                                    self._stop_event.set()
+                                    break
+
+                                continue
                     except Exception as streamer_error:
                         stream_error = streamer_error
                     finally:
                         thread.join(timeout=2.0)
+
+                    if thread.is_alive() and stream_error is None:
+                        stream_error = TimeoutError(
+                            "Generation worker did not terminate cleanly."
+                        )
+                        self._stop_event.set()
 
                     # Save cache state for caller
                     if cache_state is not None and use_session_cache and cache_key:

@@ -4,7 +4,7 @@ export function removeToolBlocks(raw = '', toolPairs = []) {
     if (!pair?.start || !pair?.end) continue
     const escapedStart = pair.start.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     const escapedEnd = pair.end.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    out = out.replace(new RegExp(`${escapedStart}[\s\S]*?${escapedEnd}`, 'gi'), '')
+    out = out.replace(new RegExp(`${escapedStart}[\\s\\S]*?${escapedEnd}`, 'gi'), '')
     const openIdx = out.toLowerCase().indexOf(pair.start.toLowerCase())
     if (openIdx !== -1 && !out.toLowerCase().slice(openIdx).includes(pair.end.toLowerCase())) {
       out = out.slice(0, openIdx)
@@ -76,12 +76,12 @@ export function parseReasoningContent({
 
     const escapedStart = pair.start.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     const escapedEnd = pair.end.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const full = new RegExp(`${escapedStart}[\s\S]*?${escapedEnd}`, 'gi')
+    const full = new RegExp(`${escapedStart}([\\s\\S]*?)${escapedEnd}`, 'gi')
     const matches = [...withoutTools.matchAll(full)]
 
     if (matches.length > 0) {
       const thinking = matches
-        .map(m => (m[0] || '').replace(new RegExp(escapedStart, 'i'), '').replace(new RegExp(escapedEnd, 'i'), '').trim())
+        .map(m => (m[1] || '').trim())
         .filter(Boolean)
         .join('\n\n')
         .trim()
@@ -147,9 +147,6 @@ export function buildAssistantParts(message, registry, preferredFormatId = null)
   }
 
   for (const call of toolCalls) {
-    if (call?.thinking?.trim()) {
-      parts.push({ type: 'reasoning', content: call.thinking.trim(), formatId: parsed.formatId })
-    }
     parts.push({
       type: 'tool_call',
       tool: call.name,

@@ -358,6 +358,11 @@ export default function ModelsView({ onBack }) {
     return null
   }
 
+  const isQuantizableModel = (model) => {
+    const quant = String(model?.quantization || '').trim().toLowerCase()
+    return quant === '' || quant === 'original' || quant === 'fp32' || quant === 'none' || quant === 'full'
+  }
+
   // GPU memory is returned as strings from the API
   const memoryFreeStr = gpuInfo?.memoryFree || formatSize(gpuInfo?.gpu?.memory_free)
   const memoryTotalStr = gpuInfo?.memoryTotal || formatSize(gpuInfo?.gpu?.memory_total)
@@ -819,6 +824,7 @@ export default function ModelsView({ onBack }) {
                   const isLoaded = loadedModel === modelKey || (!hasExactLoadedEntry && !model.quantization && loadedModel?.startsWith(`${model.model_id}__`))
                   const isLoading = loadingModel === modelKey
                   const isQuantizing = quantizingModels[modelKey]
+                  const isQuantizable = isQuantizableModel(model)
 
                   return (
                     <div
@@ -829,7 +835,7 @@ export default function ModelsView({ onBack }) {
                           : 'bg-neutral-900/50 border-white/5 hover:border-white/10'
                       }`}
                     >
-                    <div className="flex items-start justify-between gap-3">
+                    <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1">
                           <span className="text-xs font-bold text-white truncate">{model.model_id}</span>
@@ -865,9 +871,15 @@ export default function ModelsView({ onBack }) {
                             <span className="text-[10px] text-neutral-500">Fixed</span>
                           )}
                         </div>
+                        {isQuantizable && (
+                          <div className="mt-2 inline-flex items-center gap-1.5 px-2 py-1 bg-purple-500/10 border border-purple-500/20 rounded text-[10px] text-purple-300">
+                            <Zap className="w-3 h-3" />
+                            Quantize available for this model
+                          </div>
+                        )}
                       </div>
                       
-                      <div className="flex items-center gap-1">
+                      <div className="flex flex-wrap items-center justify-start sm:justify-end gap-1">
                         {isLoaded ? (
                           <button
                             onClick={handleUnload}
@@ -893,7 +905,7 @@ export default function ModelsView({ onBack }) {
                             {isLoading ? 'Loading...' : 'Load'}
                           </button>
                         )}
-                        {!model.quantization && (
+                        {isQuantizable && (
                           <button
                             onClick={() => handleQuantizeLocal(model)}
                             disabled={isQuantizing || isLoaded}
