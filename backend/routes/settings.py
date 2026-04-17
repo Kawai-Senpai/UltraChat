@@ -7,6 +7,7 @@ from fastapi import APIRouter
 
 from ..models.schemas import SettingsUpdate, SettingsResponse
 from ..config import get_settings, get_settings_manager
+from ..utils.reasoning_formats import get_reasoning_registry
 
 
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -32,6 +33,7 @@ async def get_settings_endpoint():
         "chat_defaults": settings.chat_defaults.model_dump(),
         "ui": settings.ui.model_dump(),
         "speculative_decoding": settings.speculative_decoding.model_dump(),
+        "reasoning": settings.reasoning.model_dump(),
     }
 
 
@@ -56,6 +58,9 @@ async def update_settings(data: SettingsUpdate):
     
     if data.speculative_decoding:
         update_data['speculative_decoding'] = data.speculative_decoding.model_dump(exclude_unset=True)
+
+    if data.reasoning:
+        update_data['reasoning'] = data.reasoning.model_dump(exclude_unset=True)
     
     new_settings = manager.update(**update_data)
     
@@ -69,6 +74,7 @@ async def update_settings(data: SettingsUpdate):
             "chat_defaults": new_settings.chat_defaults.model_dump(),
             "ui": new_settings.ui.model_dump(),
             "speculative_decoding": new_settings.speculative_decoding.model_dump(),
+            "reasoning": new_settings.reasoning.model_dump(),
         }
     }
 
@@ -90,7 +96,28 @@ async def reset_settings():
             "chat_defaults": new_settings.chat_defaults.model_dump(),
             "ui": new_settings.ui.model_dump(),
             "speculative_decoding": new_settings.speculative_decoding.model_dump(),
+            "reasoning": new_settings.reasoning.model_dump(),
         }
+    }
+
+
+@router.get("/reasoning-formats")
+async def get_reasoning_formats():
+    """Get available reasoning formats for parsing."""
+    registry = get_reasoning_registry()
+    return {
+        "formats": [
+            {
+                "id": fmt.id,
+                "label": fmt.label,
+                "priority": fmt.priority,
+                "model_id_patterns": fmt.model_id_patterns,
+                "reasoning_pairs": [pair.__dict__ for pair in fmt.reasoning_pairs],
+                "tool_pairs": [pair.__dict__ for pair in fmt.tool_pairs],
+            }
+            for fmt in registry.formats
+        ],
+        "defaults": registry.defaults,
     }
 
 

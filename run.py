@@ -6,9 +6,11 @@ Run this script to start the application.
 
 import sys
 import os
+import socket
 import webbrowser
 import threading
 import time
+from typing import Optional
 
 # Add the project root to the path
 project_root = os.path.dirname(os.path.abspath(__file__))
@@ -19,6 +21,24 @@ def open_browser(url: str, delay: float = 1.5):
     """Open browser after a short delay to let server start."""
     time.sleep(delay)
     webbrowser.open(url)
+
+
+def is_port_available(host: str, port: int) -> bool:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((host, port))
+        return True
+    except OSError:
+        return False
+
+
+def find_available_port(host: str, start_port: int, max_tries: int = 20) -> Optional[int]:
+    for offset in range(max_tries):
+        candidate = start_port + offset
+        if is_port_available(host, candidate):
+            return candidate
+    return None
 
 
 def main():
@@ -47,9 +67,30 @@ def main():
         print(f"⚠️  Could not load settings: {e}")
         print("Using defaults...")
         host = "127.0.0.1"
-        port = 8000
+        port = 8080
         debug = True
     
+    env_host = os.environ.get("ULTRACHAT_HOST")
+    if env_host:
+        host = env_host
+    env_port = os.environ.get("ULTRACHAT_PORT")
+    if env_port:
+        try:
+            port = int(env_port)
+        except ValueError:
+            print(f"⚠️ Invalid ULTRACHAT_PORT value: {env_port}")
+    env_debug = os.environ.get("ULTRACHAT_DEBUG")
+    if env_debug:
+        debug = env_debug.strip().lower() in ("1", "true", "yes", "on")
+
+    available_port = find_available_port(host, port)
+    if available_port is None:
+        print(f"❌ No available ports found starting from {port}")
+        sys.exit(1)
+    if available_port != port:
+        print(f"⚠️ Port {port} is in use. Using {available_port} instead.")
+        port = available_port
+
     print(f"🌐 Starting server at http://{host}:{port}")
     print(f"📖 API docs at http://{host}:{port}/docs")
     print(f"🔧 Debug mode: {debug}")

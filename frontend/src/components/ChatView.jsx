@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
 import { useApp } from '../contexts/AppContext'
 import { useToast } from '../contexts/ToastContext'
-import { chatAPI, modelsAPI } from '../lib/api'
+import { chatAPI, modelsAPI, settingsAPI } from '../lib/api'
+import { buildAssistantParts, parseReasoningContent, parseToolCalls } from '../lib/reasoningParser'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
@@ -55,6 +56,13 @@ export default function ChatView({ onToggleSidebar }) {
   const [branchCutoffIndex, setBranchCutoffIndex] = useState(null)
   const [voiceModeActive, setVoiceModeActive] = useState(false)
   const [loadQuantSelections, setLoadQuantSelections] = useState({})
+  const [reasoningRegistry, setReasoningRegistry] = useState({ formats: [], defaults: {} })
+  const [reasoningSettings, setReasoningSettings] = useState({
+    mode: 'auto',
+    preferred_format_id: '',
+    separate_blocks: true,
+    collapse_by_default: true,
+  })
   const messagesEndRef = useRef(null)
   const inputRef = useRef(null)
   const abortControllerRef = useRef(null)
@@ -86,6 +94,28 @@ export default function ChatView({ onToggleSidebar }) {
   useEffect(() => {
     loadLocalModels()
   }, [loadLocalModels])
+
+  useEffect(() => {
+    const loadReasoningConfig = async () => {
+      try {
+        const [formats, settings] = await Promise.all([
+          settingsAPI.getReasoningFormats(),
+          settingsAPI.getSettings(),
+        ])
+        setReasoningRegistry(formats || { formats: [], defaults: {} })
+        if (settings?.reasoning) {
+          setReasoningSettings(prev => ({
+            ...prev,
+            ...settings.reasoning,
+          }))
+        }
+      } catch (error) {
+        console.error('Failed to load reasoning config:', error)
+      }
+    }
+
+    loadReasoningConfig()
+  }, [])
 
   // Close dropdown when clicking outside (use click instead of mousedown)
   useEffect(() => {
@@ -880,6 +910,8 @@ export default function ChatView({ onToggleSidebar }) {
                 onRegenerate={handleRegenerate}
                 onBranchNavigate={handleBranchNavigate}
                 toolEvents={[]}
+                reasoningRegistry={reasoningRegistry}
+                reasoningSettings={reasoningSettings}
               />
             ))}
             
@@ -902,6 +934,8 @@ export default function ChatView({ onToggleSidebar }) {
                 }}
                 isStreaming
                 toolEvents={[]}
+                reasoningRegistry={reasoningRegistry}
+                reasoningSettings={reasoningSettings}
               />
             )}
             
@@ -1108,53 +1142,6 @@ export default function ChatView({ onToggleSidebar }) {
   )
 }
 
-const parseThinkingContent = (raw = '', explicitThinking = '') => {
-  if (!raw && !explicitThinking) return { thinking: '', answer: '' }
-
-  const withoutToolCalls = raw.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '').trim()
-
-  if (explicitThinking) {
-    return { thinking: explicitThinking, answer: withoutToolCalls }
-  }
-
-  const blockPattern = /<(think|thinking)>([\s\S]*?)<\/(think|thinking)>/gi
-  const openMatch = withoutToolCalls.match(/<(think|thinking)>/i)
-  const closeMatch = withoutToolCalls.match(/<\/(think|thinking)>/i)
-
-  let thinkingChunks = []
-  let answer = withoutToolCalls.replace(blockPattern, (_m, _t1, content) => {
-    thinkingChunks.push(content)
-    return ''
-  })
-
-  if (openMatch && !closeMatch) {
-    const openTag = openMatch[0]
-    const start = withoutToolCalls.toLowerCase().indexOf(openTag.toLowerCase())
-    const before = withoutToolCalls.slice(0, start)
-    const after = withoutToolCalls.slice(start + openTag.length)
-    return {
-      thinking: after.trim(),
-      answer: before.trim(),
-    }
-  }
-
-  return {
-    thinking: thinkingChunks.join('\n\n').trim(),
-    answer: answer.trim(),
-  }
-}
-
-const parseToolCalls = (toolCalls) => {
-  if (!toolCalls) return []
-  if (Array.isArray(toolCalls)) return toolCalls
-  try {
-    const parsed = JSON.parse(toolCalls)
-    return Array.isArray(parsed) ? parsed : []
-  } catch {
-    return []
-  }
-}
-
 // Message Bubble Component
 function MessageBubble({ 
   message, 
@@ -1168,13 +1155,29 @@ function MessageBubble({
   onRegenerate,
   onBranchNavigate,
   toolEvents,
+  reasoningRegistry,
+  reasoningSettings,
 }) {
   const isUser = message.role === 'user'
   const [copied, setCopied] = useState(false)
   const [branchInfo, setBranchInfo] = useState(null)
   const [isBranchLoading, setIsBranchLoading] = useState(false)
-  const { thinking, answer } = parseThinkingContent(message.content, message.thinking)
-  const [showThinking, setShowThinking] = useState(isStreaming)
+  const preferredFormatId = reasoningSettings?.preferred_format_id || null
+  const separateBlocks = reasoningSettings?.separate_blocks !== false
+  const collapseByDefault = reasoningSettings?.collapse_by_default !== false
+  const assistantParts = !isUser ? buildAssistantParts(message, reasoningRegistry, preferredFormatId) : []
+  const messageParts = assistantParts.filter(part => part.type !== 'tool_call')
+  const lastAnswerIndex = messageParts.reduce((acc, part, idx) => (part.type === 'answer' ? idx : acc), -1)
+  const parsed = !isUser && !separateBlocks
+    ? parseReasoningContent({
+      raw: message.raw_content || message.content || '',
+      explicitThinking: message.thinking || '',
+      modelId: message.model || '',
+      registry: reasoningRegistry,
+      preferredFormatId,
+    })
+    : null
+  const [showThinking, setShowThinking] = useState(isStreaming || !collapseByDefault)
 
   const storedToolCalls = parseToolCalls(message.tool_calls)
   // Merge thinking into tool calls - don't create separate thinking events
@@ -1211,7 +1214,10 @@ function MessageBubble({
   }, [message?.id, isUser, isStreaming])
 
   const handleCopy = async () => {
-    const toCopy = isUser ? message.content : (answer || message.content)
+    const answerText = !isUser
+      ? (parsed?.answer || messageParts[lastAnswerIndex]?.content || message.content || '')
+      : message.content
+    const toCopy = isUser ? message.content : answerText
     await navigator.clipboard.writeText(toCopy)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
@@ -1293,35 +1299,77 @@ function MessageBubble({
                 <p className="whitespace-pre-wrap">{message.content}</p>
               )
             ) : (
-              <div className="space-y-3">
-                {thinking && (
-                  <div className="border border-white/10 rounded-lg bg-white/3">
-                    <button
-                      onClick={() => setShowThinking(prev => !prev)}
-                      className="w-full flex items-center justify-between px-3 py-2 text-[10px] text-neutral-400 hover:text-neutral-200"
-                    >
-                      <span className="font-medium">Thinking</span>
-                      <ChevronDown className={`w-3 h-3 transition-transform ${showThinking ? 'rotate-180' : ''}`} />
-                    </button>
-                    {showThinking && (
-                      <div className="px-3 pb-3 text-[11px] text-neutral-300 whitespace-pre-wrap">
-                        {thinking}
+                separateBlocks ? (
+                  <div className="space-y-3">
+                    {(messageParts.length > 0 ? messageParts : [{ type: 'answer', content: message.content }]).map((part, index) => {
+                      if (part.type === 'reasoning') {
+                        return (
+                          <div key={`reasoning-${index}`} className="border border-white/10 rounded-lg bg-white/3">
+                            <button
+                              onClick={() => setShowThinking(prev => !prev)}
+                              className="w-full flex items-center justify-between px-3 py-2 text-[10px] text-neutral-400 hover:text-neutral-200"
+                            >
+                              <span className="font-medium">Thinking</span>
+                              <ChevronDown className={`w-3 h-3 transition-transform ${showThinking ? 'rotate-180' : ''}`} />
+                            </button>
+                            {showThinking && (
+                              <div className="px-3 pb-3 text-[11px] text-neutral-300 whitespace-pre-wrap">
+                                {part.content}
+                              </div>
+                            )}
+                          </div>
+                        )
+                      }
+
+                      return (
+                        <div
+                          key={`answer-${index}`}
+                          className="prose prose-invert max-w-none text-xs prose-li:my-0.5 prose-ul:my-1 prose-ol:my-1 prose-p:my-1.5 prose-headings:my-2"
+                        >
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm, remarkMath]}
+                            rehypePlugins={[rehypeKatex]}
+                          >
+                            {part.content || ''}
+                          </ReactMarkdown>
+                          {isStreaming && index === lastAnswerIndex && (
+                            <span className="inline-block w-2 h-5 bg-red-400 animate-pulse ml-0.5 align-middle" />
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {parsed?.thinking && (
+                      <div className="border border-white/10 rounded-lg bg-white/3">
+                        <button
+                          onClick={() => setShowThinking(prev => !prev)}
+                          className="w-full flex items-center justify-between px-3 py-2 text-[10px] text-neutral-400 hover:text-neutral-200"
+                        >
+                          <span className="font-medium">Thinking</span>
+                          <ChevronDown className={`w-3 h-3 transition-transform ${showThinking ? 'rotate-180' : ''}`} />
+                        </button>
+                        {showThinking && (
+                          <div className="px-3 pb-3 text-[11px] text-neutral-300 whitespace-pre-wrap">
+                            {parsed.thinking}
+                          </div>
+                        )}
                       </div>
                     )}
+                    <div className="prose prose-invert max-w-none text-xs prose-li:my-0.5 prose-ul:my-1 prose-ol:my-1 prose-p:my-1.5 prose-headings:my-2">
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm, remarkMath]}
+                        rehypePlugins={[rehypeKatex]}
+                      >
+                        {parsed?.answer || message.content || ''}
+                      </ReactMarkdown>
+                      {isStreaming && (
+                        <span className="inline-block w-2 h-5 bg-red-400 animate-pulse ml-0.5 align-middle" />
+                      )}
+                    </div>
                   </div>
-                )}
-                <div className="prose prose-invert max-w-none text-xs prose-li:my-0.5 prose-ul:my-1 prose-ol:my-1 prose-p:my-1.5 prose-headings:my-2">
-                  <ReactMarkdown 
-                    remarkPlugins={[remarkGfm, remarkMath]} 
-                    rehypePlugins={[rehypeKatex]}
-                  >
-                    {answer || ''}
-                  </ReactMarkdown>
-                  {isStreaming && (
-                    <span className="inline-block w-2 h-5 bg-red-400 animate-pulse ml-0.5 align-middle" />
-                  )}
-                </div>
-              </div>
+                )
             )}
           </div>
 

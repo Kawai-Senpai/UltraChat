@@ -161,6 +161,7 @@ export const modelsAPI = {
   searchModels: (query, limit = 20) => 
     api.get(`/models/search?q=${encodeURIComponent(query)}&limit=${limit}`),
   getPopularModels: (limit = 20) => api.get(`/models/popular?limit=${limit}`),
+  getModelInfo: (modelId) => api.get(`/models/hf/${encodeURIComponent(modelId)}`),
   // Updated to support multiple quantizations
   downloadModel: (modelId, quantizations, keepCache = false) => 
     api.stream('/models/download', { 
@@ -168,11 +169,19 @@ export const modelsAPI = {
       quantizations: Array.isArray(quantizations) ? quantizations : [quantizations].filter(Boolean),
       keep_cache: keepCache
     }),
+  cancelDownload: () => api.post('/models/download/cancel', {}),
   deleteModel: (modelId, quantization = null) => 
     api.post('/models/delete', { model_id: modelId, quantization }),
   loadModel: (modelId, quantization = null) => 
     api.post('/models/load', { model_id: modelId, quantization }),
   unloadModel: () => api.post('/models/unload', {}),
+  cleanupMemory: (aggressive = true) => api.post(`/models/cleanup?aggressive=${aggressive}`, {}),
+  quantizeLocal: (modelId, sourceQuantization = null, targetQuantizations = ['4bit']) =>
+    api.post('/models/quantize-local', {
+      model_id: modelId,
+      source_quantization: sourceQuantization,
+      target_quantizations: targetQuantizations,
+    }),
   setFavorite: (modelId, isFavorite = true) => 
     api.post(`/models/${encodeURIComponent(modelId)}/favorite?is_favorite=${isFavorite}`, {}),
   
@@ -215,6 +224,7 @@ export const settingsAPI = {
   updateSettings: (data) => api.patch('/settings', data),
   resetSettings: () => api.post('/settings/reset', {}),
   getStoragePaths: () => api.get('/settings/storage/paths'),
+  getReasoningFormats: () => api.get('/settings/reasoning-formats'),
 }
 
 // Voice API

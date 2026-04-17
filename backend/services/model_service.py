@@ -423,6 +423,43 @@ class ModelService:
             return {"success": True, "message": "Model unloaded"}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    async def cleanup_memory(self, aggressive: bool = True) -> Dict[str, Any]:
+        """Aggressively clean up GPU/CPU memory."""
+        try:
+            gpu = self.manager.clean_memory(aggressive=aggressive)
+            return {"success": True, "message": "Memory cleaned", "gpu": gpu}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def cancel_download(self) -> Dict[str, Any]:
+        """Cancel the active model download, if any."""
+        try:
+            return self.manager.cancel_download()
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def quantize_local(
+        self,
+        model_id: str,
+        source_quantization: Optional[str],
+        target_quantizations: List[str],
+    ) -> Dict[str, Any]:
+        """Create local quantized copies from an existing model."""
+        try:
+            paths = await self.manager.quantize_local_copy(
+                model_id=model_id,
+                source_quantization=source_quantization,
+                target_quantizations=target_quantizations,
+            )
+            return {
+                "success": True,
+                "model_id": model_id,
+                "target_quantizations": target_quantizations,
+                "paths": [str(p) for p in paths],
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
     
     async def load_assistant_model(
         self,

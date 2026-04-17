@@ -286,12 +286,22 @@ class SpeculativeDecodingSettingsUpdate(BaseModel):
     assistant_tokens_schedule: Optional[str] = None  # "constant" or "heuristic"
 
 
+class ReasoningSettingsUpdate(BaseModel):
+    mode: Optional[str] = None
+    preferred_format_id: Optional[str] = None
+    separate_blocks: Optional[bool] = None
+    collapse_by_default: Optional[bool] = None
+    parse_legacy_messages: Optional[bool] = None
+    preserve_unknown_tags_in_answer: Optional[bool] = None
+
+
 class SettingsUpdate(BaseModel):
     storage: Optional[StorageSettingsUpdate] = None
     model: Optional[ModelSettingsUpdate] = None
     chat_defaults: Optional[ChatDefaultsUpdate] = None
     ui: Optional[UISettingsUpdate] = None
     speculative_decoding: Optional[SpeculativeDecodingSettingsUpdate] = None
+    reasoning: Optional[ReasoningSettingsUpdate] = None
 
 
 class SettingsResponse(BaseModel):
@@ -302,6 +312,7 @@ class SettingsResponse(BaseModel):
     chat_defaults: Dict[str, Any]
     ui: Dict[str, Any]
     speculative_decoding: Optional[Dict[str, Any]] = None
+    reasoning: Optional[Dict[str, Any]] = None
 
 
 # ============ Generic Responses ============

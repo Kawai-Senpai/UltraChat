@@ -17,6 +17,7 @@ import logging
 import traceback
 import inspect
 from pathlib import Path
+from fnmatch import fnmatch
 from typing import Optional, Dict, Any, List, AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -327,6 +328,10 @@ class HFModelManager:
         self._kv_cache_lock = threading.Lock()
         self._kv_cache_max_entries = 8
         self._max_prompt_length = 4096
+
+        self._download_lock = threading.Lock()
+        self._download_cancel_event = threading.Event()
+        self._active_download_id: Optional[str] = None
         
         self._init_paths()
     
@@ -495,6 +500,82 @@ class HFModelManager:
                     files_completed=files_completed,
                     files_total=files_total,
                 ))
+
+    def _is_allowed_file(self, filename: str) -> bool:
+        allowed_patterns = [
+            "*.json",
+            "*.txt",
+            "*.model",
+            "*.safetensors",
+            "*.safetensors.index.json",
+            "*.bin",
+            "*.bin.index.json",
+            "*.pt",
+            "*.py",
+            "*.md",
+            "*.merges",
+            "*.vocab",
+            "*.tiktoken",
+            "*.spm",
+            "*.gguf",
+        ]
+        return any(fnmatch(filename, pattern) for pattern in allowed_patterns)
+
+    def _download_raw_repo(
+        self,
+        model_id: str,
+        cache_path: Path,
+        progress_callback: Optional[Callable[[DownloadProgress], None]] = None,
+    ) -> None:
+        info = get_model_info(model_id)
+        siblings = [
+            s for s in (info.siblings or [])
+            if s.rfilename and self._is_allowed_file(s.rfilename)
+        ]
+
+        if not siblings:
+            snapshot_download(
+                repo_id=model_id,
+                local_dir=str(cache_path),
+                local_dir_use_symlinks=False,
+            )
+            return
+
+        cache_path.mkdir(parents=True, exist_ok=True)
+        total_bytes = sum((s.size or 0) for s in siblings)
+        completed_bytes = 0
+
+        for idx, sibling in enumerate(siblings, start=1):
+            self._assert_download_not_cancelled()
+            if progress_callback:
+                progress_callback(DownloadProgress(
+                    status="downloading",
+                    model_id=model_id,
+                    current_file=sibling.rfilename,
+                    completed_bytes=completed_bytes,
+                    total_bytes=total_bytes,
+                    files_completed=idx - 1,
+                    files_total=len(siblings),
+                ))
+
+            hf_hub_download(
+                repo_id=model_id,
+                filename=sibling.rfilename,
+                local_dir=str(cache_path),
+                local_dir_use_symlinks=False,
+            )
+
+            completed_bytes += sibling.size or 0
+            if progress_callback:
+                progress_callback(DownloadProgress(
+                    status="downloading",
+                    model_id=model_id,
+                    current_file=sibling.rfilename,
+                    completed_bytes=completed_bytes,
+                    total_bytes=total_bytes,
+                    files_completed=idx,
+                    files_total=len(siblings),
+                ))
     
     # ============================================
     # Model Discovery
@@ -503,18 +584,11 @@ class HFModelManager:
     async def search_models(
         self,
         query: str,
-        task: str = "text-generation",
+        pipeline_tag: str = "text-generation",
         limit: int = 20
     ) -> List[Dict[str, Any]]:
         """Search HuggingFace for models."""
-        def _search():
-            models = list_models(
-                search=query,
-                task=task,
-                sort="downloads",
-                direction=-1,
-                limit=limit,
-            )
+        def _format(models):
             results = []
             for model in models:
                 results.append({
@@ -527,6 +601,47 @@ class HFModelManager:
                     "created_at": model.created_at.isoformat() if model.created_at else None,
                 })
             return results
+
+        def _search():
+            q = (query or "").strip()
+
+            if "/" in q:
+                try:
+                    info = get_model_info(q)
+                    return [{
+                        "model_id": info.id,
+                        "author": info.author,
+                        "downloads": info.downloads,
+                        "likes": info.likes,
+                        "pipeline_tag": info.pipeline_tag,
+                        "tags": info.tags[:10] if info.tags else [],
+                        "created_at": info.created_at.isoformat() if info.created_at else None,
+                        "exact_match": True,
+                    }]
+                except Exception:
+                    pass
+
+            primary = list(
+                list_models(
+                    search=q,
+                    pipeline_tag=pipeline_tag,
+                    sort="downloads",
+                    direction=-1,
+                    limit=limit,
+                )
+            )
+            if primary:
+                return _format(primary)
+
+            fallback = list(
+                list_models(
+                    search=q,
+                    sort="downloads",
+                    direction=-1,
+                    limit=limit,
+                )
+            )
+            return _format(fallback)
         
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(self._executor, _search)
@@ -561,11 +676,25 @@ class HFModelManager:
     
     async def get_popular_models(self, limit: int = 20) -> List[Dict[str, Any]]:
         """Get popular text generation models."""
-        return await self.search_models("", task="text-generation", limit=limit)
+        return await self.search_models("", pipeline_tag="text-generation", limit=limit)
     
     # ============================================
     # Model Download with Multi-Quantization Support
     # ============================================
+
+    def cancel_download(self) -> Dict[str, Any]:
+        """Request cancellation of the active download."""
+        if not self._active_download_id:
+            return {"success": False, "error": "No active download"}
+        self._download_cancel_event.set()
+        return {
+            "success": True,
+            "message": f"Cancellation requested for {self._active_download_id}",
+        }
+
+    def _assert_download_not_cancelled(self) -> None:
+        if self._download_cancel_event.is_set():
+            raise InterruptedError("Download cancelled by user")
     
     async def download_model(
         self,
@@ -603,83 +732,32 @@ class HFModelManager:
         
         def _download_and_quantize():
             nonlocal output_paths
-            
-            # Step 1: Download raw model to cache
-            if progress_callback:
-                progress_callback(DownloadProgress(
-                    status="downloading",
-                    model_id=model_id,
-                ))
-            
-            # Check if already in cache
-            if not cache_path.exists() or not any(cache_path.iterdir()):
-                # Download to cache directory
-                snapshot_download(
-                    repo_id=model_id,
-                    local_dir=str(cache_path),
-                    local_dir_use_symlinks=False,
-                )
-            else:
-                if progress_callback:
-                    progress_callback(DownloadProgress(
-                        status="using_cache",
-                        model_id=model_id,
-                    ))
-            
-            # Step 2: Create each quantized version
-            for idx, quant in enumerate(quantizations):
-                quant_label = quant if quant else "fp32"
-                
-                if progress_callback:
-                    progress_callback(DownloadProgress(
-                        status=f"quantizing_{quant_label}",
-                        model_id=model_id,
-                        files_completed=idx,
-                        files_total=len(quantizations),
-                    ))
-                
-                output_path = self._get_model_local_path(model_id, quant)
-                
-                # Skip if already exists and is valid
-                if output_path.exists() and self._is_valid_model_dir(output_path):
-                    logger.info(f"✅ {quant_label} version already exists, skipping...")
-                    output_paths.append(output_path)
-                    continue
-                
-                # Clean up any incomplete previous attempts
-                if output_path.exists():
-                    shutil.rmtree(output_path)
-                
-                output_path.mkdir(parents=True, exist_ok=True)
-                incomplete_marker = output_path / ".download_incomplete"
-                incomplete_marker.write_text(
-                    f"Incomplete download for {model_id} ({quant_label})\n"
-                    f"Started: {datetime.now().isoformat()}"
-                )
-                
-                # For 4bit/8bit: Load with quantization and save as a separate model
-                if quant in ("4bit", "8bit"):
-                    model = None  # Track for cleanup
-                    tokenizer = None
-                    try:
-                        logger.info(f"📦 Loading tokenizer from cache for {quant_label}...")
+            with self._download_lock:
+                self._download_cancel_event.clear()
+                self._active_download_id = model_id
+                try:
+                    # Step 1: Download raw model to cache
+                    if progress_callback:
+                        progress_callback(DownloadProgress(
+                            status="downloading",
+                            model_id=model_id,
+                        ))
+
+                    # Check if already in cache
+                    if not cache_path.exists() or not any(cache_path.iterdir()):
+                        self._download_raw_repo(model_id, cache_path, progress_callback)
+                    else:
                         if progress_callback:
                             progress_callback(DownloadProgress(
-                                status=f"loading_tokenizer_{quant_label}",
+                                status="using_cache",
                                 model_id=model_id,
-                                files_completed=idx,
-                                files_total=len(quantizations),
                             ))
-                        tokenizer = AutoTokenizer.from_pretrained(
-                            str(cache_path),
-                            trust_remote_code=True,
-                        )
-                        # Set pad token if not set
-                        if tokenizer.pad_token_id is None:
-                            tokenizer.pad_token = tokenizer.eos_token
-                        
-                        logger.info(f"🔧 Loading model with {quant_label} quantization (this may take several minutes)...")
-                        logger.info(f"   Using NF4 quantization with double quant and CPU offload enabled...")
+
+                    # Step 2: Create each quantized version
+                    for idx, quant in enumerate(quantizations):
+                        self._assert_download_not_cancelled()
+                        quant_label = quant if quant else "fp32"
+
                         if progress_callback:
                             progress_callback(DownloadProgress(
                                 status=f"quantizing_{quant_label}",
@@ -687,209 +765,271 @@ class HFModelManager:
                                 files_completed=idx,
                                 files_total=len(quantizations),
                             ))
-                        
-                        logger.debug(f"   📥 Loading checkpoint shards...")
-                        
-                        # Calculate max memory to use - leave 1GB buffer on GPU
-                        max_memory = None
-                        if torch.cuda.is_available():
-                            gpu_mem = torch.cuda.get_device_properties(0).total_memory
-                            gpu_available = gpu_mem - torch.cuda.memory_allocated(0)
-                            # Use 90% of available GPU memory, rest on CPU
-                            gpu_use = int(gpu_available * 0.9)
-                            max_memory = {0: gpu_use, "cpu": "32GB"}
-                            logger.info(f"   📊 GPU memory limit: {gpu_use / 1024**3:.1f}GB")
-                        
-                        def is_oom_error(error: Exception) -> bool:
-                            """Check if error is out of memory."""
-                            msg = str(error).lower()
-                            return "out of memory" in msg or ("cuda" in msg and "memory" in msg)
-                        
-                        # Try GPU-only first (like Qwen LoRa pattern), fallback to auto if OOM
-                        try:
-                            logger.info(f"   🎯 Attempting GPU-only load for quantization...")
-                            quant_config = get_quantization_config(quant, allow_cpu_offload=False)
-                            model = AutoModelForCausalLM.from_pretrained(
-                                str(cache_path),
-                                quantization_config=quant_config,
-                                torch_dtype="auto",
-                                device_map={"": 0},  # GPU-only, no meta tensors
-                                trust_remote_code=True,
-                                low_cpu_mem_usage=True,
-                            )
-                        except (RuntimeError, ValueError) as e:
-                            if is_oom_error(e):
-                                logger.warning(f"   ⚠️ GPU-only load failed (OOM). Falling back to CPU offload...")
+
+                        output_path = self._get_model_local_path(model_id, quant)
+
+                        # Skip if already exists and is valid
+                        if output_path.exists() and self._is_valid_model_dir(output_path):
+                            logger.info(f"✅ {quant_label} version already exists, skipping...")
+                            output_paths.append(output_path)
+                            continue
+
+                        # Clean up any incomplete previous attempts
+                        if output_path.exists():
+                            shutil.rmtree(output_path)
+
+                        output_path.mkdir(parents=True, exist_ok=True)
+                        incomplete_marker = output_path / ".download_incomplete"
+                        incomplete_marker.write_text(
+                            f"Incomplete download for {model_id} ({quant_label})\n"
+                            f"Started: {datetime.now().isoformat()}"
+                        )
+
+                        # For 4bit/8bit: Load with quantization and save as a separate model
+                        if quant in ("4bit", "8bit"):
+                            model = None  # Track for cleanup
+                            tokenizer = None
+                            try:
+                                logger.info(f"📦 Loading tokenizer from cache for {quant_label}...")
+                                if progress_callback:
+                                    progress_callback(DownloadProgress(
+                                        status=f"loading_tokenizer_{quant_label}",
+                                        model_id=model_id,
+                                        files_completed=idx,
+                                        files_total=len(quantizations),
+                                    ))
+                                tokenizer = AutoTokenizer.from_pretrained(
+                                    str(cache_path),
+                                    trust_remote_code=True,
+                                )
+                                # Set pad token if not set
+                                if tokenizer.pad_token_id is None:
+                                    tokenizer.pad_token = tokenizer.eos_token
+
+                                logger.info(f"🔧 Loading model with {quant_label} quantization (this may take several minutes)...")
+                                logger.info("   Using NF4 quantization with double quant and CPU offload enabled...")
+                                if progress_callback:
+                                    progress_callback(DownloadProgress(
+                                        status=f"quantizing_{quant_label}",
+                                        model_id=model_id,
+                                        files_completed=idx,
+                                        files_total=len(quantizations),
+                                    ))
+
+                                logger.debug("   Loading checkpoint shards...")
+
+                                # Calculate max memory to use - leave 1GB buffer on GPU
+                                max_memory = None
+                                if torch.cuda.is_available():
+                                    gpu_mem = torch.cuda.get_device_properties(0).total_memory
+                                    gpu_available = gpu_mem - torch.cuda.memory_allocated(0)
+                                    # Use 90% of available GPU memory, rest on CPU
+                                    gpu_use = int(gpu_available * 0.9)
+                                    max_memory = {0: gpu_use, "cpu": "32GB"}
+                                    logger.info(f"   GPU memory limit: {gpu_use / 1024**3:.1f}GB")
+
+                                def is_oom_error(error: Exception) -> bool:
+                                    """Check if error is out of memory."""
+                                    msg = str(error).lower()
+                                    return "out of memory" in msg or ("cuda" in msg and "memory" in msg)
+
+                                # Try GPU-only first (like Qwen LoRa pattern), fallback to auto if OOM
+                                try:
+                                    logger.info("   Attempting GPU-only load for quantization...")
+                                    quant_config = get_quantization_config(quant, allow_cpu_offload=False)
+                                    model = AutoModelForCausalLM.from_pretrained(
+                                        str(cache_path),
+                                        quantization_config=quant_config,
+                                        torch_dtype="auto",
+                                        device_map={"": 0},  # GPU-only, no meta tensors
+                                        trust_remote_code=True,
+                                        low_cpu_mem_usage=True,
+                                    )
+                                except (RuntimeError, ValueError) as e:
+                                    if is_oom_error(e):
+                                        logger.warning("GPU-only load failed (OOM). Falling back to CPU offload...")
+                                        gc.collect()
+                                        if torch.cuda.is_available():
+                                            torch.cuda.empty_cache()
+
+                                        quant_config = get_quantization_config(quant, allow_cpu_offload=True)
+                                        model = AutoModelForCausalLM.from_pretrained(
+                                            str(cache_path),
+                                            quantization_config=quant_config,
+                                            torch_dtype="auto",
+                                            device_map="auto",
+                                            max_memory=max_memory,
+                                            trust_remote_code=True,
+                                            low_cpu_mem_usage=True,
+                                        )
+                                    else:
+                                        raise
+
+                                logger.debug("   Checkpoint shards loaded, model object created")
+
+                                logger.info("Model loaded and quantized")
+                                # Display memory usage
+                                if torch.cuda.is_available():
+                                    allocated = torch.cuda.memory_allocated() / 1024**3
+                                    logger.info(f"   GPU memory used: {allocated:.2f} GB")
+
+                                logger.info(f"Saving {quant_label} model to disk (this may take a while for large models)...")
+                                if progress_callback:
+                                    progress_callback(DownloadProgress(
+                                        status=f"saving_{quant_label}",
+                                        model_id=model_id,
+                                        files_completed=idx,
+                                        files_total=len(quantizations),
+                                    ))
+
+                                try:
+                                    model.save_pretrained(str(output_path), safe_serialization=True)
+                                    tokenizer.save_pretrained(str(output_path))
+                                    logger.info(f"{quant_label} model saved successfully")
+                                except Exception as save_error:
+                                    error_str = str(save_error).lower()
+                                    if "meta" in error_str or "item" in error_str:
+                                        logger.warning("Safe serialization failed (meta tensors). Saving without safe_serialization...")
+                                        # Try without safe serialization (uses pickle instead of safetensors)
+                                        model.save_pretrained(str(output_path), safe_serialization=False)
+                                        tokenizer.save_pretrained(str(output_path))
+                                        logger.info(f"{quant_label} model saved (pickle format)")
+                                    else:
+                                        raise save_error
+
+                                # Create a marker file that tells the loader the quantization level
+                                marker_file = output_path / f".quantization_{quant}"
+                                marker_file.write_text(f"Quantized: {quant}\nCreated: {datetime.now().isoformat()}")
+
+                                # Mark download as complete
+                                (output_path / ".download_complete").write_text(
+                                    f"Completed: {datetime.now().isoformat()}"
+                                )
+                                incomplete_marker.unlink(missing_ok=True)
+
+                                logger.info(f"{quant_label} model saved to {output_path}")
+                                output_paths.append(output_path)
+
+                            except Exception as quant_error:
+                                logger.error(f"Failed to quantize model: {quant_error}")
+                                logger.error(traceback.format_exc())
+                                raise QuantizationError(f"Failed to create {quant_label} version: {quant_error}")
+                            finally:
+                                # ALWAYS cleanup model from GPU on error or success
+                                if model is not None:
+                                    del model
+                                if tokenizer is not None:
+                                    del tokenizer
                                 gc.collect()
                                 if torch.cuda.is_available():
                                     torch.cuda.empty_cache()
-                                
-                                quant_config = get_quantization_config(quant, allow_cpu_offload=True)
-                                model = AutoModelForCausalLM.from_pretrained(
-                                    str(cache_path),
-                                    quantization_config=quant_config,
-                                    torch_dtype="auto",
-                                    device_map="auto",
-                                    max_memory=max_memory,
-                                    trust_remote_code=True,
-                                    low_cpu_mem_usage=True,
-                                )
-                            else:
-                                raise
-                        
-                        logger.debug(f"   ✅ Checkpoint shards loaded, model object created!")
-                        
-                        logger.info(f"✅ Model loaded and quantized!")
-                        # Display memory usage
-                        if torch.cuda.is_available():
-                            allocated = torch.cuda.memory_allocated() / 1024**3
-                            logger.info(f"   💾 GPU memory used: {allocated:.2f} GB")
-                        
-                        logger.info(f"💾 Saving {quant_label} model to disk (this may take a while for large models)...")
-                        if progress_callback:
-                            progress_callback(DownloadProgress(
-                                status=f"saving_{quant_label}",
+                                    allocated = torch.cuda.memory_allocated() / 1024**3
+                                    logger.debug(f"   GPU memory after cleanup: {allocated:.2f} GB")
+
+                        elif quant == "fp16":
+                            logger.info("Converting to FP16 (half precision)...")
+                            if progress_callback:
+                                progress_callback(DownloadProgress(
+                                    status="converting_fp16",
+                                    model_id=model_id,
+                                    files_completed=idx,
+                                    files_total=len(quantizations),
+                                ))
+
+                            # Load tokenizer
+                            tokenizer = AutoTokenizer.from_pretrained(
+                                str(cache_path),
+                                trust_remote_code=True,
+                            )
+
+                            # Load model in fp16
+                            model = AutoModelForCausalLM.from_pretrained(
+                                str(cache_path),
+                                torch_dtype=torch.float16,
+                                device_map="cpu",  # Load to CPU for saving
+                                trust_remote_code=True,
+                                low_cpu_mem_usage=True,
+                            )
+
+                            logger.info("Saving FP16 version...")
+                            if progress_callback:
+                                progress_callback(DownloadProgress(
+                                    status="saving_fp16",
+                                    model_id=model_id,
+                                    files_completed=idx,
+                                    files_total=len(quantizations),
+                                ))
+                            model.save_pretrained(str(output_path))
+                            tokenizer.save_pretrained(str(output_path))
+
+                            # Mark download as complete
+                            (output_path / ".download_complete").write_text(
+                                f"Completed: {datetime.now().isoformat()}"
+                            )
+                            incomplete_marker.unlink(missing_ok=True)
+
+                            logger.info(f"FP16 version saved to {output_path}")
+
+                            # Free memory
+                            del model
+                            del tokenizer
+                            gc.collect()
+
+                            output_paths.append(output_path)
+
+                        else:
+                            # Full precision (fp32) - just copy files
+                            logger.info("Copying FP32 model files...")
+                            self._link_or_copy_model_files(
+                                src_dir=cache_path,
+                                dest_dir=output_path,
                                 model_id=model_id,
+                                status="copying_fp32",
+                                progress_callback=progress_callback,
                                 files_completed=idx,
                                 files_total=len(quantizations),
+                            )
+
+                            # Mark download as complete
+                            (output_path / ".download_complete").write_text(
+                                f"Completed: {datetime.now().isoformat()}"
+                            )
+                            incomplete_marker.unlink(missing_ok=True)
+
+                            logger.info("FP32 version ready")
+                            output_paths.append(output_path)
+            
+                    # Step 3: Clean up cache if not keeping
+                    if not keep_cache and cache_path.exists():
+                        if progress_callback:
+                            progress_callback(DownloadProgress(
+                                status="cleaning_cache",
+                                model_id=model_id,
                             ))
-                        
-                        try:
-                            model.save_pretrained(str(output_path), safe_serialization=True)
-                            tokenizer.save_pretrained(str(output_path))
-                            logger.info(f"✅ {quant_label} model saved successfully!")
-                        except Exception as save_error:
-                            error_str = str(save_error).lower()
-                            if "meta" in error_str or "item" in error_str:
-                                logger.warning(f"   ⚠️ Safe serialization failed (meta tensors), trying without safe_serialization...")
-                                # Try without safe serialization (uses pickle instead of safetensors)
-                                model.save_pretrained(str(output_path), safe_serialization=False)
-                                tokenizer.save_pretrained(str(output_path))
-                                logger.info(f"✅ {quant_label} model saved (pickle format)!")
-                            else:
-                                raise save_error
-                        
-                        # Create a marker file that tells the loader the quantization level
-                        marker_file = output_path / f".quantization_{quant}"
-                        marker_file.write_text(f"Quantized: {quant}\nCreated: {datetime.now().isoformat()}")
-                        
-                        # Mark download as complete
-                        (output_path / ".download_complete").write_text(
-                            f"Completed: {datetime.now().isoformat()}"
-                        )
-                        incomplete_marker.unlink(missing_ok=True)
-                        
-                        logger.info(f"✅ {quant_label} model saved to {output_path}")
-                        output_paths.append(output_path)
-                        
-                    except Exception as quant_error:
-                        logger.error(f"❌ Failed to quantize model: {quant_error}")
-                        logger.error(traceback.format_exc())
-                        raise QuantizationError(f"Failed to create {quant_label} version: {quant_error}")
-                    finally:
-                        # ALWAYS cleanup model from GPU on error or success
-                        if model is not None:
-                            del model
-                        if tokenizer is not None:
-                            del tokenizer
-                        gc.collect()
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                            allocated = torch.cuda.memory_allocated() / 1024**3
-                            logger.debug(f"   🧹 GPU memory after cleanup: {allocated:.2f} GB")
-                    
-                elif quant == "fp16":
-                    logger.info(f"📦 Converting to FP16 (half precision)...")
+                        shutil.rmtree(cache_path)
+
+                    # Report completion
                     if progress_callback:
                         progress_callback(DownloadProgress(
-                            status="converting_fp16",
+                            status="complete",
                             model_id=model_id,
-                            files_completed=idx,
+                            files_completed=len(quantizations),
                             files_total=len(quantizations),
                         ))
-                    
-                    # Load tokenizer
-                    tokenizer = AutoTokenizer.from_pretrained(
-                        str(cache_path),
-                        trust_remote_code=True,
-                    )
-                    
-                    # Load model in fp16
-                    model = AutoModelForCausalLM.from_pretrained(
-                        str(cache_path),
-                        torch_dtype=torch.float16,
-                        device_map="cpu",  # Load to CPU for saving
-                        trust_remote_code=True,
-                        low_cpu_mem_usage=True,
-                    )
-                    
-                    logger.info(f"💾 Saving FP16 version...")
-                    if progress_callback:
-                        progress_callback(DownloadProgress(
-                            status="saving_fp16",
-                            model_id=model_id,
-                            files_completed=idx,
-                            files_total=len(quantizations),
-                        ))
-                    model.save_pretrained(str(output_path))
-                    tokenizer.save_pretrained(str(output_path))
-                    
-                    # Mark download as complete
-                    (output_path / ".download_complete").write_text(
-                        f"Completed: {datetime.now().isoformat()}"
-                    )
-                    incomplete_marker.unlink(missing_ok=True)
-                    
-                    logger.info(f"✅ FP16 version saved to {output_path}")
-                    
-                    # Free memory
-                    del model
-                    del tokenizer
-                    gc.collect()
-                    
-                    output_paths.append(output_path)
-                    
-                else:
-                    # Full precision (fp32) - just copy files
-                    logger.info(f"📁 Copying FP32 model files...")
-                    self._link_or_copy_model_files(
-                        src_dir=cache_path,
-                        dest_dir=output_path,
-                        model_id=model_id,
-                        status="copying_fp32",
-                        progress_callback=progress_callback,
-                        files_completed=idx,
-                        files_total=len(quantizations),
-                    )
-                    
-                    # Mark download as complete
-                    (output_path / ".download_complete").write_text(
-                        f"Completed: {datetime.now().isoformat()}"
-                    )
-                    incomplete_marker.unlink(missing_ok=True)
-                    
-                    logger.info(f"✅ FP32 version ready")
-                    output_paths.append(output_path)
-            
-            # Step 3: Clean up cache if not keeping
-            if not keep_cache and cache_path.exists():
-                if progress_callback:
-                    progress_callback(DownloadProgress(
-                        status="cleaning_cache",
-                        model_id=model_id,
-                    ))
-                shutil.rmtree(cache_path)
-            
-            # Report completion
-            if progress_callback:
-                progress_callback(DownloadProgress(
-                    status="complete",
-                    model_id=model_id,
-                    files_completed=len(quantizations),
-                    files_total=len(quantizations),
-                ))
-            
-            return output_paths
+
+                    return output_paths
+                except InterruptedError:
+                    logger.warning("Download cancelled: %s", model_id)
+                    for quant in quantizations:
+                        path = self._get_model_local_path(model_id, quant)
+                        if path.exists() and (path / ".download_incomplete").exists():
+                            shutil.rmtree(path, ignore_errors=True)
+                    if cache_path.exists() and not keep_cache:
+                        shutil.rmtree(cache_path, ignore_errors=True)
+                    raise
+                finally:
+                    self._active_download_id = None
+                    self._download_cancel_event.clear()
         
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(self._executor, _download_and_quantize)
@@ -908,6 +1048,118 @@ class HFModelManager:
         quants = [quantization] if quantization else [None]
         paths = await self.download_model(model_id, quants, progress_callback, keep_cache=False)
         return paths[0] if paths else None
+
+    async def quantize_local_copy(
+        self,
+        model_id: str,
+        source_quantization: Optional[str],
+        target_quantizations: List[str],
+        progress_callback: Optional[Callable[[DownloadProgress], None]] = None,
+    ) -> List[Path]:
+        """Create quantized copies from a locally available model directory."""
+        source_quantization = normalize_quantization(source_quantization)
+        source_path = self._get_model_local_path(model_id, source_quantization)
+
+        if not self._is_valid_model_dir(source_path):
+            raise ModelNotFoundError(
+                f"Local source model not found: {model_id} ({source_quantization or 'original'})"
+            )
+
+        normalized_targets: List[Optional[str]] = []
+        for quant in target_quantizations:
+            q = normalize_quantization(quant)
+            if q not in normalized_targets:
+                normalized_targets.append(q)
+        if not normalized_targets:
+            normalized_targets = [None]
+
+        def _run():
+            output_paths: List[Path] = []
+            for idx, quant in enumerate(normalized_targets):
+                quant_label = quant or "fp32"
+                output_path = self._get_model_local_path(model_id, quant)
+
+                if output_path.exists() and self._is_valid_model_dir(output_path):
+                    output_paths.append(output_path)
+                    continue
+
+                if output_path.exists():
+                    shutil.rmtree(output_path)
+
+                output_path.mkdir(parents=True, exist_ok=True)
+                incomplete_marker = output_path / ".download_incomplete"
+                incomplete_marker.write_text(
+                    f"Incomplete local quantization for {model_id} ({quant_label})\n"
+                    f"Started: {datetime.now().isoformat()}"
+                )
+
+                if quant in ("4bit", "8bit"):
+                    tokenizer = AutoTokenizer.from_pretrained(
+                        str(source_path),
+                        trust_remote_code=True,
+                    )
+                    if tokenizer.pad_token_id is None:
+                        tokenizer.pad_token = tokenizer.eos_token
+
+                    model = AutoModelForCausalLM.from_pretrained(
+                        str(source_path),
+                        quantization_config=get_quantization_config(quant, allow_cpu_offload=True),
+                        torch_dtype="auto",
+                        device_map="auto",
+                        trust_remote_code=True,
+                        low_cpu_mem_usage=True,
+                    )
+                    model.save_pretrained(str(output_path), safe_serialization=True)
+                    tokenizer.save_pretrained(str(output_path))
+                    (output_path / f".quantization_{quant}").write_text(
+                        f"Quantized: {quant}\nCreated: {datetime.now().isoformat()}"
+                    )
+                    del model
+                    del tokenizer
+                elif quant == "fp16":
+                    tokenizer = AutoTokenizer.from_pretrained(
+                        str(source_path),
+                        trust_remote_code=True,
+                    )
+                    if tokenizer.pad_token_id is None:
+                        tokenizer.pad_token = tokenizer.eos_token
+
+                    model = AutoModelForCausalLM.from_pretrained(
+                        str(source_path),
+                        torch_dtype=torch.float16,
+                        device_map="auto",
+                        trust_remote_code=True,
+                        low_cpu_mem_usage=True,
+                    )
+                    model.save_pretrained(str(output_path), safe_serialization=True)
+                    tokenizer.save_pretrained(str(output_path))
+                    del model
+                    del tokenizer
+                else:
+                    self._link_or_copy_model_files(
+                        src_dir=source_path,
+                        dest_dir=output_path,
+                        model_id=model_id,
+                        status=f"copying_{quant_label}",
+                        progress_callback=progress_callback,
+                        files_completed=idx,
+                        files_total=len(normalized_targets),
+                    )
+
+                (output_path / ".download_complete").write_text(
+                    f"Completed: {datetime.now().isoformat()}"
+                )
+                incomplete_marker.unlink(missing_ok=True)
+                output_paths.append(output_path)
+
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            return output_paths
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self._executor, _run)
     
     # ============================================
     # Local Model Management
@@ -1092,12 +1344,8 @@ class HFModelManager:
             
             # Resolve "auto" to the best available implementation
             if attn_setting == "auto":
-                if FLASH_ATTN_AVAILABLE:
-                    attn_impl = "flash_attention_2"
-                    logger.info("⚡ Using Flash Attention 2 (auto-detected)")
-                else:
-                    attn_impl = "sdpa"
-                    logger.info("🔧 Using SDPA attention (flash_attn not available)")
+                attn_impl = "sdpa"
+                logger.info("Using SDPA attention as the default")
             else:
                 attn_impl = attn_setting
                 if attn_impl == "flash_attention_2" and not FLASH_ATTN_AVAILABLE:
@@ -1239,10 +1487,68 @@ class HFModelManager:
         
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(self._executor, _load)
+
+    def clean_memory(self, aggressive: bool = True) -> Dict[str, Any]:
+        """Aggressively release model memory on CPU and GPU."""
+        self._stop_event.set()
+
+        model_refs = [
+            "_loaded_model",
+            "_loaded_assistant_model",
+        ]
+        tokenizer_refs = [
+            "_loaded_tokenizer",
+            "_loaded_assistant_tokenizer",
+        ]
+
+        for attr in model_refs:
+            model = getattr(self, attr, None)
+            if model is not None:
+                try:
+                    model.cpu()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
+        for attr in tokenizer_refs:
+            setattr(self, attr, None)
+
+        self._loaded_model_id = None
+        self._loaded_quantization = None
+        self._loaded_assistant_model_id = None
+        self._loaded_assistant_quantization = None
+        self.clear_kv_cache()
+
+        gc.collect()
+        gc.collect()
+
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass
+            torch.cuda.empty_cache()
+            if aggressive:
+                try:
+                    torch.cuda.ipc_collect()
+                except Exception:
+                    pass
+
+        try:
+            torch._dynamo.reset()
+        except Exception:
+            pass
+
+        return self.gpu_info
     
     def unload_model(self):
         """Unload the currently loaded model from memory."""
+        self._stop_event.set()
         if self._loaded_model is not None:
+            try:
+                self._loaded_model.cpu()
+            except Exception:
+                pass
             del self._loaded_model
             self._loaded_model = None
         
@@ -1255,12 +1561,21 @@ class HFModelManager:
         self.clear_kv_cache()
         
         gc.collect()
+        gc.collect()
         if torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass
             torch.cuda.empty_cache()
 
     def unload_assistant_model(self):
         """Unload the assistant model used for speculative decoding."""
         if self._loaded_assistant_model is not None:
+            try:
+                self._loaded_assistant_model.cpu()
+            except Exception:
+                pass
             del self._loaded_assistant_model
             self._loaded_assistant_model = None
         
@@ -1272,8 +1587,17 @@ class HFModelManager:
         self._loaded_assistant_quantization = None
         
         gc.collect()
+        gc.collect()
         if torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass
             torch.cuda.empty_cache()
+            try:
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
         
         logger.info("🗑️ Assistant model unloaded")
 
@@ -1342,7 +1666,7 @@ class HFModelManager:
             settings_mgr = get_settings_manager()
             attn_setting = settings_mgr.get("model.attention_implementation", "auto")
             if attn_setting == "auto":
-                attn_impl = "flash_attention_2" if FLASH_ATTN_AVAILABLE else "sdpa"
+                attn_impl = "sdpa"
             else:
                 attn_impl = attn_setting
                 if attn_impl == "flash_attention_2" and not FLASH_ATTN_AVAILABLE:
@@ -1688,11 +2012,14 @@ class HFModelManager:
                 return self.stop_event.is_set()
 
         loop = asyncio.get_running_loop()
-        queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
+        queue: asyncio.Queue = asyncio.Queue()
 
         cache_entry = self._get_kv_cache_entry(cache_key) if use_session_cache else None
 
         def _worker():
+            def _emit(kind: str, payload: Any) -> None:
+                loop.call_soon_threadsafe(queue.put_nowait, (kind, payload))
+
             try:
                 with self._generation_lock, torch.inference_mode():
                     # Tokenize
@@ -1737,6 +2064,7 @@ class HFModelManager:
                         self._loaded_tokenizer,
                         skip_prompt=True,
                         skip_special_tokens=True,
+                        timeout=1.0,
                     )
 
                     # Generation config with static KV cache for faster inference
@@ -1759,12 +2087,12 @@ class HFModelManager:
                         "output_hidden_states": False,
                         "output_attentions": False,
                     }
-                    
+
                     # Speculative decoding with assistant model
                     if use_speculative and self._loaded_assistant_model is not None:
                         gen_kwargs["assistant_model"] = self._loaded_assistant_model
                         gen_kwargs["num_assistant_tokens"] = num_assistant_tokens
-                        logger.debug(f"🚀 Using speculative decoding with K={num_assistant_tokens}")
+                        logger.debug("Using speculative decoding with K=%s", num_assistant_tokens)
 
                     if past_key_values is not None:
                         gen_kwargs["past_key_values"] = past_key_values
@@ -1786,6 +2114,10 @@ class HFModelManager:
                             result_container["output"] = self._loaded_model.generate(**gen_kwargs)
                         except Exception as e:
                             result_container["error"] = e
+                            try:
+                                streamer.on_finalized_text("", stream_end=True)
+                            except Exception:
+                                pass
 
                     thread = threading.Thread(
                         target=_run_generate,
@@ -1793,11 +2125,14 @@ class HFModelManager:
                     )
                     thread.start()
 
-                    # Stream tokens into async queue
-                    for token in streamer:
-                        loop.call_soon_threadsafe(queue.put_nowait, token)
-
-                    thread.join()
+                    stream_error = None
+                    try:
+                        for token in streamer:
+                            _emit("token", token)
+                    except Exception as streamer_error:
+                        stream_error = streamer_error
+                    finally:
+                        thread.join(timeout=2.0)
 
                     # Save cache state for caller
                     if cache_state is not None and use_session_cache and cache_key:
@@ -1816,19 +2151,24 @@ class HFModelManager:
                             "prefix_len": prefix_len,
                         })
 
-                    # Surface generation errors
-                    if "error" in result_container:
-                        raise result_container["error"]
+                    error = result_container.get("error") or stream_error
+                    if error is not None:
+                        _emit("error", error)
+            except Exception as e:
+                _emit("error", e)
             finally:
-                loop.call_soon_threadsafe(queue.put_nowait, None)
+                _emit("done", None)
 
         threading.Thread(target=_worker, daemon=True).start()
 
         while True:
-            token = await queue.get()
-            if token is None:
+            kind, payload = await queue.get()
+            if kind == "token":
+                yield payload
+            elif kind == "error":
+                raise payload
+            elif kind == "done":
                 break
-            yield token
     
     async def generate_complete(
         self,

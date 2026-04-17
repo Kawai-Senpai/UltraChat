@@ -40,6 +40,14 @@ export default function SettingsView({ onBack }) {
       num_assistant_tokens: 4,
       assistant_tokens_schedule: 'heuristic',
     },
+    reasoning: {
+      mode: 'auto',
+      preferred_format_id: '',
+      separate_blocks: true,
+      collapse_by_default: true,
+      parse_legacy_messages: true,
+      preserve_unknown_tags_in_answer: false,
+    },
   })
   const [storagePath, setStoragePath] = useState('')
   const [isSaving, setIsSaving] = useState(false)
@@ -143,6 +151,11 @@ export default function SettingsView({ onBack }) {
           compact_mode: false,
           tool_thinking: true,
         },
+        speculative_decoding: data.speculative_decoding || {
+          enabled: true,
+          num_assistant_tokens: 4,
+          assistant_tokens_schedule: 'heuristic',
+        },
         voice: data.voice || {
           tts_enabled: true,
           stt_enabled: true,
@@ -152,6 +165,14 @@ export default function SettingsView({ onBack }) {
           chunk_max_words: 16,
           chunk_max_wait_s: 0.7,
           auto_load_tts: false,
+        },
+        reasoning: data.reasoning || {
+          mode: 'auto',
+          preferred_format_id: '',
+          separate_blocks: true,
+          collapse_by_default: true,
+          parse_legacy_messages: true,
+          preserve_unknown_tags_in_answer: false,
         },
       })
     } catch (error) {
@@ -198,6 +219,11 @@ export default function SettingsView({ onBack }) {
           compact_mode: false,
           tool_thinking: true,
         },
+        speculative_decoding: data.speculative_decoding || {
+          enabled: true,
+          num_assistant_tokens: 4,
+          assistant_tokens_schedule: 'heuristic',
+        },
         voice: data.voice || {
           tts_enabled: true,
           stt_enabled: true,
@@ -207,6 +233,14 @@ export default function SettingsView({ onBack }) {
           chunk_max_words: 16,
           chunk_max_wait_s: 0.7,
           auto_load_tts: false,
+        },
+        reasoning: data.reasoning || {
+          mode: 'auto',
+          preferred_format_id: '',
+          separate_blocks: true,
+          collapse_by_default: true,
+          parse_legacy_messages: true,
+          preserve_unknown_tags_in_answer: false,
         },
       })
       toast.success('Settings reset to defaults')
@@ -372,7 +406,7 @@ export default function SettingsView({ onBack }) {
                   className="w-full px-4 py-2.5 bg-neutral-900 border border-white/10 rounded-lg
                              text-xs text-white focus:outline-none focus:border-red-500/50"
                 >
-                  <option value="auto">Auto (use Flash Attention if available)</option>
+                  <option value="auto">Auto (SDPA default)</option>
                   <option value="flash_attention_2">Flash Attention 2 (fastest, requires flash_attn)</option>
                   <option value="sdpa">SDPA (PyTorch built-in, works everywhere)</option>
                   <option value="eager">Eager (slowest, most compatible)</option>
@@ -499,6 +533,65 @@ export default function SettingsView({ onBack }) {
                 description="Reduce spacing between messages"
                 checked={settings.ui.compact_mode}
                 onChange={(val) => updateSetting('ui', 'compact_mode', val)}
+              />
+            </div>
+          </section>
+
+          {/* Reasoning Parsing */}
+          <section className="p-5 bg-white/5 border border-white/10 rounded-xl">
+            <div className="flex items-center gap-3 mb-5">
+              <div className="w-10 h-10 rounded-xl bg-indigo-500/20 flex items-center justify-center">
+                <Settings className="w-5 h-5 text-indigo-400" />
+              </div>
+              <div>
+                <h3 className="text-xs font-black text-white">Reasoning Parsing</h3>
+                <p className="text-[10px] text-neutral-500">Detect and display reasoning blocks</p>
+              </div>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <Settings className="w-4 h-4 text-neutral-500" />
+                  <label className="text-xs font-bold text-neutral-300">Mode</label>
+                </div>
+                <select
+                  value={settings.reasoning?.mode || 'auto'}
+                  onChange={(e) => updateSetting('reasoning', 'mode', e.target.value)}
+                  className="w-full px-4 py-2.5 bg-neutral-900 border border-white/10 rounded-lg
+                             text-xs text-white focus:outline-none focus:border-red-500/50"
+                >
+                  <option value="off">Off</option>
+                  <option value="auto">Auto</option>
+                  <option value="force">Force preferred format</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-neutral-300 mb-2">Preferred format id</label>
+                <input
+                  type="text"
+                  value={settings.reasoning?.preferred_format_id || ''}
+                  onChange={(e) => updateSetting('reasoning', 'preferred_format_id', e.target.value)}
+                  placeholder="xml_think_basic"
+                  className="w-full px-4 py-2.5 bg-neutral-900 border border-white/10 rounded-lg
+                             text-xs text-white focus:outline-none focus:border-red-500/50"
+                />
+                <p className="text-[10px] text-neutral-500 mt-1">Used when mode is set to force</p>
+              </div>
+
+              <ToggleSetting
+                label="Render reasoning in separate blocks"
+                description="Show thinking outside the final answer bubble"
+                checked={settings.reasoning?.separate_blocks ?? true}
+                onChange={(val) => updateSetting('reasoning', 'separate_blocks', val)}
+              />
+
+              <ToggleSetting
+                label="Collapse reasoning by default"
+                description="Start reasoning blocks collapsed in the UI"
+                checked={settings.reasoning?.collapse_by_default ?? true}
+                onChange={(val) => updateSetting('reasoning', 'collapse_by_default', val)}
               />
             </div>
           </section>
@@ -834,7 +927,7 @@ function ToggleSetting({ label, description, checked, onChange }) {
         role="switch"
         aria-checked={checked}
         onClick={() => onChange(!checked)}
-        className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full 
+        className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full 
                     border-2 border-transparent transition-colors duration-200 ease-in-out
                     ${checked ? 'bg-red-500' : 'bg-neutral-700'}`}
       >

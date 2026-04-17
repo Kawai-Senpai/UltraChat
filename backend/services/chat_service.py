@@ -29,6 +29,7 @@ from ..models import (
 from ..config import get_settings_manager
 from .web_search_service import get_web_search_service
 from .tool_service import get_tool_service
+from ..utils.reasoning_formats import get_reasoning_registry
 
 
 class ChatService:
@@ -46,6 +47,7 @@ class ChatService:
         self.settings = get_settings_manager()
         self.tool_service = get_tool_service()
         self.logger = logging.getLogger("ultrachat.chat")
+        self.reasoning_registry = get_reasoning_registry()
 
         # Pattern for model "thinking" blocks (Qwen/Qwen3 style)
         self._thinking_pattern = re.compile(
@@ -63,21 +65,29 @@ class ChatService:
         """Remove <think> blocks from text for history/context."""
         if not text:
             return text
-        cleaned = re.sub(self._thinking_pattern, "", text)
-        return cleaned.strip()
+        preferred = self.settings.get("reasoning.preferred_format_id")
+        parsed = self.reasoning_registry.split_response(
+            text,
+            model_id=self.manager.current_model,
+            preferred_format_id=preferred,
+        )
+        return parsed.get("answer", "").strip()
 
     def _split_thinking(self, text: str) -> (str, str):
         """Split raw content into (thinking, final_text)."""
         if not text:
             return "", text
-
-        match = self._thinking_pattern.search(text)
-        if not match:
+        mode = self.settings.get("reasoning.mode", "auto")
+        if mode == "off":
             return "", text.strip()
 
-        thinking = match.group(1) or match.group(2) or ""
-        final_text = re.sub(self._thinking_pattern, "", text, count=1).strip()
-        return thinking.strip(), final_text
+        preferred = self.settings.get("reasoning.preferred_format_id")
+        parsed = self.reasoning_registry.split_response(
+            text,
+            model_id=self.manager.current_model,
+            preferred_format_id=preferred,
+        )
+        return parsed.get("thinking", "").strip(), parsed.get("answer", "").strip()
 
     def _apply_thinking_directives(self, text: str, enable_thinking: Optional[bool]) -> (str, Optional[bool]):
         """Parse /think and /no_think directives and return cleaned text + override."""

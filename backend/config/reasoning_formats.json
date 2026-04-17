@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "defaults": {
+    "mode": "auto",
+    "fallback_to_content_only": true,
+    "prefer_explicit_thinking_field": true,
+    "max_scan_chars": 32768
+  },
+  "formats": [
+    {
+      "id": "xml_think_basic",
+      "label": "XML think tags",
+      "priority": 100,
+      "model_id_patterns": [
+        "(?i)qwen",
+        "(?i)deepseek",
+        "(?i)reasoning",
+        "(?i)r1",
+        "(?i)opus"
+      ],
+      "reasoning_pairs": [
+        { "start": "<think>", "end": "</think>" },
+        { "start": "<thinking>", "end": "</thinking>" },
+        { "start": "<reasoning>", "end": "</reasoning>" },
+        { "start": "<analysis>", "end": "</analysis>" }
+      ],
+      "tool_pairs": [
+        { "start": "<tool_call>", "end": "</tool_call>" },
+        { "start": "<tool>", "end": "</tool>" }
+      ]
+    },
+    {
+      "id": "channel_markers",
+      "label": "Channel markers",
+      "priority": 90,
+      "model_id_patterns": [
+        "(?i)claude",
+        "(?i)assistant"
+      ],
+      "reasoning_pairs": [
+        { "start": "<|analysis|>", "end": "<|/analysis|>" },
+        { "start": "[[analysis]]", "end": "[[/analysis]]" }
+      ],
+      "tool_pairs": [
+        { "start": "<|tool_call|>", "end": "<|/tool_call|>" }
+      ]
+    },
+    {
+      "id": "generic_fallback",
+      "label": "Generic fallback",
+      "priority": 1,
+      "model_id_patterns": [],
+      "reasoning_pairs": [
+        { "start": "<think>", "end": "</think>" },
+        { "start": "<thinking>", "end": "</thinking>" },
+        { "start": "<reasoning>", "end": "</reasoning>" },
+        { "start": "<analysis>", "end": "</analysis>" }
+      ],
+      "tool_pairs": [
+        { "start": "<tool_call>", "end": "</tool_call>" }
+      ]
+    }
+  ]
+}

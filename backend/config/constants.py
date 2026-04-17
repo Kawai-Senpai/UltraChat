@@ -48,4 +48,4 @@ DEFAULT_ASSISTANT_TOKENS_SCHEDULE = "heuristic"  # "constant" or "heuristic" (au
 DEFAULT_SPECULATIVE_ENABLED = True  # Enable speculative decoding when assistant model is loaded
 
 # Attention Implementation Defaults
-DEFAULT_ATTENTION_IMPLEMENTATION = "auto"  # "auto", "flash_attention_2", "sdpa", "eager"
+DEFAULT_ATTENTION_IMPLEMENTATION = "sdpa"  # "auto", "flash_attention_2", "sdpa", "eager"

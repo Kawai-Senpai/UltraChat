@@ -36,6 +36,8 @@ export default function ModelsView({ onBack }) {
   const [loadingModel, setLoadingModel] = useState(null)
   const [loadingAssistant, setLoadingAssistant] = useState(null)
   const [loadQuantSelections, setLoadQuantSelections] = useState({})
+  const [isCleaning, setIsCleaning] = useState(false)
+  const [quantizingModels, setQuantizingModels] = useState({})
   
   // Voice models state
   const [voiceStatus, setVoiceStatus] = useState(null)
@@ -136,11 +138,22 @@ export default function ModelsView({ onBack }) {
   }
 
   const handleSearch = async () => {
-    if (!searchQuery.trim()) return
-    
+    const query = searchQuery.trim()
+    if (!query) return
+
     setIsSearching(true)
     try {
-      const data = await modelsAPI.searchModels(searchQuery)
+      if (query.includes('/')) {
+        try {
+          const exact = await modelsAPI.getModelInfo(query)
+          setSearchResults(exact ? [exact] : [])
+          return
+        } catch (error) {
+          console.warn('Exact lookup failed, falling back to search:', error)
+        }
+      }
+
+      const data = await modelsAPI.searchModels(query)
       setSearchResults(data.models || [])
     } catch (error) {
       toast.error('Search failed: ' + error.message)
@@ -241,6 +254,52 @@ export default function ModelsView({ onBack }) {
       loadSystemStatus()
     } catch (error) {
       toast.error('Failed to unload: ' + error.message)
+    }
+  }
+
+  const handleCleanupMemory = async () => {
+    if (isCleaning) return
+    setIsCleaning(true)
+    try {
+      await modelsAPI.cleanupMemory(true)
+      toast.success('Memory cleaned')
+      await loadSystemStatus()
+    } catch (error) {
+      toast.error('Cleanup failed: ' + error.message)
+    } finally {
+      setIsCleaning(false)
+    }
+  }
+
+  const handleCancelDownload = async () => {
+    try {
+      await modelsAPI.cancelDownload()
+      toast.success('Download cancellation requested')
+    } catch (error) {
+      toast.error('Failed to cancel: ' + error.message)
+    }
+  }
+
+  const handleQuantizeLocal = async (model) => {
+    const modelKey = getModelKey(model)
+    if (quantizingModels[modelKey]) return
+
+    setQuantizingModels(prev => ({
+      ...prev,
+      [modelKey]: true,
+    }))
+
+    try {
+      await modelsAPI.quantizeLocal(model.model_id, model.quantization || null, ['4bit', '8bit', 'fp16'])
+      toast.success('Local quantization completed')
+      await loadLocalModels()
+    } catch (error) {
+      toast.error('Quantization failed: ' + error.message)
+    } finally {
+      setQuantizingModels(prev => ({
+        ...prev,
+        [modelKey]: false,
+      }))
     }
   }
 
@@ -384,6 +443,19 @@ export default function ModelsView({ onBack }) {
                   <span className="text-xs text-neutral-500 italic">No model loaded</span>
                 )}
               </div>
+            </div>
+
+            <div className="mt-4 flex items-center justify-end">
+              <button
+                onClick={handleCleanupMemory}
+                disabled={isCleaning}
+                className="flex items-center gap-2 px-3 py-1.5 bg-yellow-500/20 hover:bg-yellow-500/30
+                           text-yellow-400 text-xs font-medium rounded-lg transition-colors
+                           disabled:opacity-50"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                {isCleaning ? 'Cleaning...' : 'Clean Memory'}
+              </button>
             </div>
           </div>
 
@@ -533,7 +605,7 @@ export default function ModelsView({ onBack }) {
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-                  placeholder="Search models (e.g., Qwen, Llama, Mistral)"
+                  placeholder="Search models or paste exact repo id (e.g., Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled)"
                   className="w-full pl-10 pr-4 py-2.5 bg-neutral-900 border border-white/10 rounded-lg
                              text-xs text-white placeholder-neutral-500
                              focus:outline-none focus:border-red-500/50 transition-colors"
@@ -610,7 +682,7 @@ export default function ModelsView({ onBack }) {
                   >
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
-                        <Box className="w-4 h-4 text-neutral-500 flex-shrink-0" />
+                        <Box className="w-4 h-4 text-neutral-500 shrink-0" />
                         <span className="text-xs font-medium text-white truncate">
                           {model.model_id}
                         </span>
@@ -696,6 +768,17 @@ export default function ModelsView({ onBack }) {
                     <span className="ml-2">{downloadProgress.files_completed || 0}/{downloadProgress.files_total}</span>
                   )}
                 </div>
+
+                <div className="mt-3 flex items-center justify-end">
+                  <button
+                    onClick={handleCancelDownload}
+                    className="flex items-center gap-2 px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30
+                               text-red-400 text-xs font-medium rounded-lg transition-colors"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                    Cancel download
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -735,6 +818,7 @@ export default function ModelsView({ onBack }) {
                   const modelKey = getModelKey(model)
                   const isLoaded = loadedModel === modelKey || (!hasExactLoadedEntry && !model.quantization && loadedModel?.startsWith(`${model.model_id}__`))
                   const isLoading = loadingModel === modelKey
+                  const isQuantizing = quantizingModels[modelKey]
 
                   return (
                     <div
@@ -807,6 +891,19 @@ export default function ModelsView({ onBack }) {
                               <Sparkles className="w-3.5 h-3.5" />
                             )}
                             {isLoading ? 'Loading...' : 'Load'}
+                          </button>
+                        )}
+                        {!model.quantization && (
+                          <button
+                            onClick={() => handleQuantizeLocal(model)}
+                            disabled={isQuantizing || isLoaded}
+                            className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-500/20 hover:bg-purple-500/30
+                                       text-purple-400 text-xs font-medium rounded-lg transition-colors
+                                       disabled:opacity-50"
+                            title="Create quantized copies"
+                          >
+                            <Zap className="w-3.5 h-3.5" />
+                            {isQuantizing ? 'Quantizing...' : 'Quantize'}
                           </button>
                         )}
                         <button

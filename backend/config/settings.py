@@ -106,13 +106,23 @@ class SpeculativeDecodingSettings(BaseModel):
     assistant_tokens_schedule: str = DEFAULT_ASSISTANT_TOKENS_SCHEDULE  # "constant" or "heuristic"
 
 
+class ReasoningSettings(BaseModel):
+    """Reasoning parsing configuration."""
+    mode: str = "auto"  # "off", "auto", "force"
+    preferred_format_id: Optional[str] = None
+    separate_blocks: bool = True
+    collapse_by_default: bool = True
+    parse_legacy_messages: bool = True
+    preserve_unknown_tags_in_answer: bool = False
+
+
 class AppSettings(BaseSettings):
     """Main application settings."""
     app_name: str = "UltraChat"
     version: str = "1.0.0"
     debug: bool = False
     host: str = "127.0.0.1"
-    port: int = 8000
+    port: int = 8080
     
     # Sub-settings (loaded from config file)
     storage: StorageSettings = StorageSettings()
@@ -121,6 +131,7 @@ class AppSettings(BaseSettings):
     ui: UISettings = UISettings()
     voice: VoiceSettings = VoiceSettings()
     speculative_decoding: SpeculativeDecodingSettings = SpeculativeDecodingSettings()
+    reasoning: ReasoningSettings = ReasoningSettings()
     
     class Config:
         env_prefix = "ULTRACHAT_"
@@ -173,6 +184,8 @@ class SettingsManager:
         else:
             self._settings = AppSettings()
             self._save_settings()
+
+        self._apply_env_overrides()
         
         # Ensure directories exist
         self._ensure_directories()
@@ -199,6 +212,26 @@ class SettingsManager:
             self._config_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self._config_path, "w", encoding="utf-8") as f:
                 json.dump(self._settings.model_dump(), f, indent=2)
+
+    def _apply_env_overrides(self) -> None:
+        """Apply environment variable overrides without persisting them."""
+        if not self._settings:
+            return
+
+        env_host = os.environ.get("ULTRACHAT_HOST")
+        if env_host:
+            self._settings.host = env_host
+
+        env_port = os.environ.get("ULTRACHAT_PORT")
+        if env_port:
+            try:
+                self._settings.port = int(env_port)
+            except ValueError:
+                print(f"Warning: Invalid ULTRACHAT_PORT value: {env_port}")
+
+        env_debug = os.environ.get("ULTRACHAT_DEBUG")
+        if env_debug:
+            self._settings.debug = env_debug.strip().lower() in ("1", "true", "yes", "on")
     
     @property
     def settings(self) -> AppSettings:

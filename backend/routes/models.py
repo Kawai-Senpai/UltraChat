@@ -43,6 +43,13 @@ class ModelDeleteRequest(BaseModel):
     quantization: Optional[str] = None
 
 
+class QuantizeLocalRequest(BaseModel):
+    """Request to quantize a locally available model."""
+    model_id: str
+    source_quantization: Optional[str] = None
+    target_quantizations: List[str]
+
+
 # ============================================
 # System Status
 # ============================================
@@ -137,6 +144,16 @@ async def download_model(request: ModelDownloadRequest):
     )
 
 
+@router.post("/download/cancel")
+async def cancel_model_download():
+    """Cancel the active model download, if any."""
+    service = get_model_service()
+    result = await service.cancel_download()
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error"))
+    return result
+
+
 @router.post("/delete")
 async def delete_model(request: ModelDeleteRequest):
     """Delete a locally downloaded model."""
@@ -185,6 +202,16 @@ async def unload_model():
     return result
 
 
+@router.post("/cleanup")
+async def cleanup_memory(aggressive: bool = True):
+    """Clean up GPU and CPU memory after unload."""
+    service = get_model_service()
+    result = await service.cleanup_memory(aggressive=aggressive)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error"))
+    return result
+
+
 @router.get("/loaded")
 async def get_loaded_model():
     """Get info about the currently loaded model."""
@@ -195,6 +222,20 @@ async def get_loaded_model():
         return {"loaded": False}
     
     return {"loaded": True, **loaded}
+
+
+@router.post("/quantize-local")
+async def quantize_local_model(request: QuantizeLocalRequest):
+    """Create quantized copies from a local model."""
+    service = get_model_service()
+    result = await service.quantize_local(
+        request.model_id,
+        request.source_quantization,
+        request.target_quantizations,
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error"))
+    return result
 
 
 # ============================================
