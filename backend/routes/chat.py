@@ -9,18 +9,14 @@ from typing import Optional
 
 from ..models.schemas import (
     ChatRequest,
-    ChatResponse,
     RegenerateRequest,
     ConversationCreate,
     ConversationUpdate,
-    ConversationResponse,
-    ConversationDetail,
     MessageEdit,
-    SuccessResponse,
-    ErrorResponse,
 )
 from ..models import ConversationModel, MessageModel
 from ..services import get_chat_service, get_message_tree_service
+from ..services.remote_chat_service import get_remote_chat_service
 
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -35,6 +31,26 @@ async def send_message(request: ChatRequest):
     service = get_chat_service()
     
     async def generate():
+        if request.provider_mode != "local":
+            remote = get_remote_chat_service()
+            async for event in remote.send(
+                conversation_id=request.conversation_id,
+                message=request.message,
+                parent_id=request.parent_id,
+                profile_id=request.profile_id,
+                model=request.model or "",
+                mode=request.provider_mode,
+                base_url=request.provider_base_url or "http://localhost:8001",
+                api_key=request.provider_api_key or "",
+                stream=request.stream,
+                tools=request.tools or [],
+                thinking=bool(request.enable_thinking),
+                structured_schema=request.structured_schema,
+                options=request.options or {},
+                allow_system_mutation=request.allow_system_mutation,
+            ):
+                yield event
+            return
         async for event in service.send_message(
             conversation_id=request.conversation_id,
             message=request.message,
@@ -46,7 +62,8 @@ async def send_message(request: ChatRequest):
             web_search=request.web_search,
             use_memory=request.use_memory,
             enable_thinking=request.enable_thinking,
-            tools=request.tools
+            tools=request.tools,
+            allow_system_mutation=request.allow_system_mutation,
         ):
             yield event
     

@@ -55,7 +55,14 @@ class WebSearchService:
         
         results = []
         try:
-            with DDGS() as ddgs:
+            # DDGS performs network I/O in this worker thread.  Its own
+            # deadline keeps a stalled upstream from consuming the worker
+            # forever; RemoteChatService also guards the awaited operation.
+            try:
+                client = DDGS(timeout=self.timeout)
+            except TypeError:  # Compatibility with older duckduckgo-search.
+                client = DDGS()
+            with client as ddgs:
                 search_results = ddgs.text(
                     query,
                     max_results=max_results or self.max_results,
@@ -75,12 +82,10 @@ class WebSearchService:
     
     async def search(self, query: str, max_results: Optional[int] = None) -> List[SearchResult]:
         """Search the web asynchronously."""
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            self._executor,
-            self._search_sync,
-            query,
-            max_results
+        loop = asyncio.get_running_loop()
+        return await asyncio.wait_for(
+            loop.run_in_executor(self._executor, self._search_sync, query, max_results),
+            timeout=self.timeout + 2,
         )
     
     async def search_and_format(self, query: str, max_results: Optional[int] = None) -> str:

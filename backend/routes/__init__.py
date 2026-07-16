@@ -8,6 +8,7 @@ from .profiles import router as profiles_router
 from .memory import router as memory_router
 from .settings import router as settings_router
 from .voice import router as voice_router
+from .providers import router as providers_router
 
 __all__ = [
     "chat_router",
@@ -16,4 +17,5 @@ __all__ = [
     "memory_router",
     "settings_router",
     "voice_router",
+    "providers_router",
 ]

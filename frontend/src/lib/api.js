@@ -94,6 +94,7 @@ class ApiClient {
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
+    let currentEvent = null
 
     try {
       while (true) {
@@ -103,8 +104,6 @@ class ApiClient {
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
         buffer = lines.pop() || ''
-        
-        let currentEvent = null
         
         for (const line of lines) {
           if (line.startsWith('event:')) {
@@ -152,6 +151,11 @@ export const chatAPI = {
   navigateBranch: (messageId, direction) => api.post(`/chat/messages/${messageId}/navigate/${direction}`, {}),
   switchBranch: (messageId) => api.post(`/chat/messages/${messageId}/switch`, {}),
   stopGeneration: () => api.post('/chat/stop', {}),
+}
+
+export const providersAPI = {
+  capabilities: () => api.get('/providers/capabilities'),
+  discoverModels: (data) => api.post('/providers/models', data),
 }
 
 // Models API

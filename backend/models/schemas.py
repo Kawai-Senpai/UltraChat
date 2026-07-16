@@ -152,6 +152,19 @@ class ChatRequest(BaseModel):
     enable_thinking: Optional[bool] = None  # Enable/disable model thinking if supported
     # Tool toggles
     tools: Optional[List[str]] = None  # Enabled tool names: ["web_search", "wikipedia", "web_fetch", "calculator"]
+    # Remote stress-test provider settings. Values are request-scoped server-side:
+    # API keys are never persisted in SQLite conversations or config.json. The
+    # local frontend may remember them in browser local storage at the user's choice.
+    provider_mode: str = "local"  # local|mljunction|openai|anthropic|langchain_mljunction
+    provider_base_url: Optional[str] = None
+    provider_api_key: Optional[str] = None
+    structured_schema: Optional[Dict[str, Any]] = None
+    allow_system_mutation: bool = False  # supplied only after a browser confirmation
+
+
+class ProviderModelsRequest(BaseModel):
+    base_url: str = Field(..., min_length=1)
+    api_key: Optional[str] = None
 
 
 class ChatResponse(BaseModel):

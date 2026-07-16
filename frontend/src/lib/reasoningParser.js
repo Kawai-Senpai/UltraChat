@@ -131,8 +131,19 @@ export function parseToolCalls(toolCalls) {
 }
 
 export function buildAssistantParts(message, registry, preferredFormatId = null) {
+  let raw = message.raw_content || message.content || ''
+  // Older provider-lab messages stored adapter diagnostics here. They are not
+  // model output, so prefer the persisted assistant content when encountered.
+  try {
+    const parsedRaw = JSON.parse(raw)
+    if (parsedRaw && typeof parsedRaw === 'object' && (parsedRaw.protocol || parsedRaw._deltas)) {
+      raw = message.content || ''
+    }
+  } catch {
+    // Plain model output is expected not to be JSON.
+  }
   const parsed = parseReasoningContent({
-    raw: message.raw_content || message.content || '',
+    raw,
     explicitThinking: message.thinking || '',
     modelId: message.model || '',
     registry,

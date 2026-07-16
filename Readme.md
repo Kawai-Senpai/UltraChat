@@ -387,6 +387,46 @@ So the strongest accurate claim is:
 
 **UltraChat can run a very wide range of Hugging Face local LLMs, then quantize and accelerate them inside one integrated workflow.**
 
+## Provider Stress Lab
+
+The chat header's **Provider stress lab** selector can keep the local Hugging
+Face workflow or test a ML Junction gateway through four transport modes:
+
+- **ML Junction native**: `http://localhost:8001/v1/responses`
+- **OpenAI SDK**: gateway root `http://localhost:8001`, using its
+  `/openai/v1/chat/completions` facade
+- **Anthropic SDK**: gateway root `http://localhost:8001`, using its
+  `/anthropic/v1/messages` facade
+- **ML Junction LangChain SDK**: shown only when `langchain_mljunction` is
+  installed in the UltraChat Python environment
+
+Each remote mode accepts a custom gateway root and model name; the model picker
+can discover `GET /v1/models`, but manual model names are always accepted. API
+keys can be remembered in the current browser's local storage so localhost
+testing does not require re-entering them. The stress lab includes a
+**Forget saved key** action and an opt-out toggle. Keys are never stored in
+UltraChat's SQLite conversation database or `data/config.json`; browser local
+storage is plaintext to scripts running on the same origin, so use this only on
+a trusted local installation.
+
+Remote requests can stream or run non-streaming, expose route/tool events in a
+debug timeline, call the existing web, calculator, weather, memory, and file
+tools, and run a nested strict-JSON subagent. The full-system file list/read
+tools accept Windows and Linux paths. File writes and shell commands are
+available only after the browser asks for confirmation for that individual chat
+turn; command output and exit status are displayed in the tool/debug timeline.
+
+For a remote-only installation with no PyTorch or local-model dependencies:
+
+```bash
+pip install -r requirements-remote.txt
+python run.py
+```
+
+The Local HF, model-download, quantization, and local voice-generation controls
+remain unavailable until the normal local-model dependencies—including PyTorch—
+are installed.
+
 ## Storage Layout
 
 ```text

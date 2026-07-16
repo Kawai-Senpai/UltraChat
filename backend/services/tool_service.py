@@ -7,6 +7,8 @@ import ast
 import operator
 import asyncio
 import json
+import os
+from pathlib import Path
 from typing import Optional, Dict, Any, List, Callable
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
@@ -74,6 +76,12 @@ class ToolService:
             "calculator": True,  # Pure Python, always available
             "memory_store": True,  # Always available
             "memory_search": True,  # Always available
+            "weather": HAS_HTTPX,
+            "file_list": True,
+            "file_read": True,
+            "file_write": True,
+            "command_execute": True,
+            "structured_subagent": True,
         }
     
     def get_tool_definitions(self, enabled_tools: List[str]) -> List[Dict[str, Any]]:
@@ -159,6 +167,88 @@ class ToolService:
                     }
                 }
             },
+            "weather": {
+                "type": "function",
+                "function": {
+                    "name": "weather",
+                    "description": "Get the current weather for a city or location.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"location": {"type": "string"}},
+                        "required": ["location"],
+                    },
+                },
+            },
+            "file_list": {
+                "type": "function",
+                "function": {
+                    "name": "file_list",
+                    "description": "List files and folders below the configured read-only file root.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string", "default": "."}},
+                    },
+                },
+            },
+            "file_read": {
+                "type": "function",
+                "function": {
+                    "name": "file_read",
+                    "description": "Read a UTF-8 text file below the configured read-only file root. Secret files are blocked.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "max_chars": {"type": "integer", "default": 12000},
+                        },
+                        "required": ["path"],
+                    },
+                },
+            },
+            "file_write": {
+                "type": "function",
+                "function": {
+                    "name": "file_write",
+                    "description": "Write UTF-8 text to any file on the local system. This tool requires explicit user confirmation for the current turn.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "content": {"type": "string"},
+                            "overwrite": {"type": "boolean", "default": False},
+                        },
+                        "required": ["path", "content"],
+                    },
+                },
+            },
+            "command_execute": {
+                "type": "function",
+                "function": {
+                    "name": "command_execute",
+                    "description": "Run a command on the local system. This tool requires explicit user confirmation for the current turn.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string"},
+                            "timeout_seconds": {"type": "integer", "default": 30, "minimum": 1, "maximum": 120},
+                            "working_directory": {"type": "string"},
+                        },
+                        "required": ["command"],
+                    },
+                },
+            },
+            "structured_subagent": {
+                "type": "function",
+                "function": {
+                    "name": "structured_subagent",
+                    "description": "Delegate a focused task to a second model call that must return strict JSON. Use when a verified structured analysis would help.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"task": {"type": "string"}},
+                        "required": ["task"],
+                    },
+                },
+            },
             "memory_store": {
                 "type": "function",
                 "function": {
@@ -228,7 +318,7 @@ class ToolService:
     # Tool Execution
     # ============================================
     
-    async def execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> ToolResult:
+    async def execute_tool(self, tool_name: str, arguments: Dict[str, Any], *, allow_system_mutation: bool = False) -> ToolResult:
         """Execute a tool by name with given arguments."""
         tool_map: Dict[str, Callable] = {
             "wikipedia": self.wikipedia_search,
@@ -236,6 +326,12 @@ class ToolService:
             "calculator": self.calculator,
             "memory_store": self.memory_store,
             "memory_search": self.memory_search,
+            "weather": self.weather,
+            "file_list": self.file_list,
+            "file_read": self.file_read,
+            "file_write": self.file_write,
+            "command_execute": self.command_execute,
+            "structured_subagent": self.structured_subagent_unavailable,
         }
         
         if tool_name not in tool_map:
@@ -243,6 +339,12 @@ class ToolService:
                 success=False,
                 data=None,
                 error=f"Unknown tool: {tool_name}"
+            )
+        if tool_name in {"file_write", "command_execute"} and not allow_system_mutation:
+            return ToolResult(
+                success=False,
+                data=None,
+                error="User confirmation is required before file writes or command execution",
             )
         
         try:
@@ -416,6 +518,124 @@ class ToolService:
         
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(self._executor, _evaluate_sync)
+
+    # ============================================
+    # Local developer tools (read-only)
+    # ============================================
+
+    async def weather(self, location: str) -> ToolResult:
+        """Fetch a compact current-weather report without an API key."""
+        if not HAS_HTTPX:
+            return ToolResult(success=False, data=None, error="httpx package not installed")
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(
+                    f"https://wttr.in/{location}", params={"format": "j1"},
+                    headers={"User-Agent": "UltraChat local test client"},
+                )
+                response.raise_for_status()
+            current = response.json().get("current_condition", [{}])[0]
+            return ToolResult(success=True, data={
+                "location": location,
+                "temperature_c": current.get("temp_C"),
+                "feels_like_c": current.get("FeelsLikeC"),
+                "description": (current.get("weatherDesc") or [{}])[0].get("value"),
+                "humidity": current.get("humidity"),
+                "wind_kmph": current.get("windspeedKmph"),
+            })
+        except Exception as exc:
+            return ToolResult(success=False, data=None, error=str(exc))
+
+    @staticmethod
+    def _system_path(supplied: str) -> Path:
+        """Resolve an absolute or current-working-directory-relative system path.
+
+        The UI labels these tools as full-system developer tools. Mutating
+        operations are still gated in :meth:`execute_tool` by a per-turn user
+        confirmation; read-only operations intentionally are not sandboxed.
+        """
+        return Path(supplied).expanduser().resolve()
+
+    async def file_list(self, path: str = ".") -> ToolResult:
+        try:
+            directory = self._system_path(path)
+            if not directory.is_dir():
+                return ToolResult(success=False, data=None, error="Path is not a directory")
+            entries = [
+                {"name": item.name, "kind": "directory" if item.is_dir() else "file", "size": item.stat().st_size if item.is_file() else None}
+                for item in sorted(directory.iterdir(), key=lambda entry: (not entry.is_dir(), entry.name.lower()))[:200]
+            ]
+            return ToolResult(success=True, data={"path": str(directory), "entries": entries})
+        except Exception as exc:
+            return ToolResult(success=False, data=None, error=str(exc))
+
+    async def file_read(self, path: str, max_chars: int = 12000) -> ToolResult:
+        try:
+            target = self._system_path(path)
+            if not target.is_file():
+                return ToolResult(success=False, data=None, error="Path is not a file")
+            limit = max(1, min(int(max_chars), 50_000))
+            if target.stat().st_size > 2_000_000:
+                return ToolResult(success=False, data=None, error="File is too large to read safely")
+            content = target.read_text(encoding="utf-8", errors="replace")
+            return ToolResult(success=True, data={
+                "path": str(target), "content": content[:limit], "truncated": len(content) > limit,
+            })
+        except Exception as exc:
+            return ToolResult(success=False, data=None, error=str(exc))
+
+    async def file_write(self, path: str, content: str, overwrite: bool = False) -> ToolResult:
+        """Write a text file after the caller has granted per-turn permission."""
+        try:
+            target = self._system_path(path)
+            existed = target.exists()
+            if existed and not overwrite:
+                return ToolResult(success=False, data=None, error="File already exists; set overwrite=true after reviewing the target")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            return ToolResult(success=True, data={"path": str(target), "bytes_written": len(content.encode("utf-8")), "overwritten": existed})
+        except Exception as exc:
+            return ToolResult(success=False, data=None, error=str(exc))
+
+    async def command_execute(
+        self,
+        command: str,
+        timeout_seconds: int = 30,
+        working_directory: Optional[str] = None,
+    ) -> ToolResult:
+        """Run an explicitly approved shell command on Windows or Linux/macOS."""
+        try:
+            timeout = max(1, min(int(timeout_seconds), 120))
+            cwd = str(self._system_path(working_directory)) if working_directory else None
+            process = await asyncio.create_subprocess_shell(
+                command,
+                cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.communicate()
+                return ToolResult(success=False, data=None, error=f"Command timed out after {timeout} seconds")
+            return ToolResult(success=process.returncode == 0, data={
+                "command": command,
+                "platform": os.name,
+                "return_code": process.returncode,
+                "stdout": stdout.decode("utf-8", errors="replace")[:20_000],
+                "stderr": stderr.decode("utf-8", errors="replace")[:20_000],
+            }, error=None if process.returncode == 0 else f"Command exited with {process.returncode}")
+        except Exception as exc:
+            return ToolResult(success=False, data=None, error=str(exc))
+
+    async def structured_subagent_unavailable(self, task: str) -> ToolResult:
+        """Local HF mode has no protocol-level schema guarantee for this test tool."""
+        return ToolResult(
+            success=False,
+            data=None,
+            error="Structured subagent is available in a remote provider mode only",
+        )
     
     def _safe_eval(self, node):
         """Safely evaluate an AST node."""

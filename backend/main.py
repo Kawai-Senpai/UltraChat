@@ -3,7 +3,6 @@ UltraChat - FastAPI Main Application
 Entry point for the backend server.
 """
 
-import os
 import time
 import logging
 from contextlib import asynccontextmanager
@@ -13,10 +12,11 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .config import get_settings, API_PREFIX
 from .models import init_database
-from .core import close_model_manager, get_model_manager, close_voice_manager
+from .core import close_voice_manager, get_model_manager
 from .routes import (
     chat_router,
     models_router,
@@ -24,6 +24,7 @@ from .routes import (
     memory_router,
     settings_router,
     voice_router,
+    providers_router,
 )
 from .routes.web_search import router as web_search_router
 
@@ -38,21 +39,28 @@ async def lifespan(app: FastAPI):
     await init_database()
     print("✅ Database initialized")
     
-    # Check GPU availability
-    manager = get_model_manager()
-    gpu_info = manager.gpu_info
-    if gpu_info.get("available"):
-        print(f"✅ GPU available: {gpu_info.get('device_name')}")
-        mem_gb = gpu_info.get('memory_total', 0) / (1024**3)
-        print(f"   Memory: {mem_gb:.1f} GB")
-    else:
-        print("⚠️  No GPU detected - using CPU (will be slower)")
+    # Check GPU availability only when the optional local runtime exists.
+    local_runtime_available = False
+    try:
+        manager = get_model_manager()
+        local_runtime_available = True
+        gpu_info = manager.gpu_info
+        if gpu_info.get("available"):
+            print(f"GPU available: {gpu_info.get('device_name')}")
+            mem_gb = gpu_info.get('memory_total', 0) / (1024**3)
+            print(f"   Memory: {mem_gb:.1f} GB")
+        else:
+            print("No GPU detected - using CPU")
+    except RuntimeError:
+        print("PyTorch is not installed: local HF features are disabled; remote provider modes are available.")
     
     yield
     
     # Shutdown
     print("👋 Shutting down UltraChat...")
-    await close_model_manager()
+    if local_runtime_available:
+        from .core import close_model_manager
+        await close_model_manager()
     await close_voice_manager()
 
 
@@ -73,6 +81,34 @@ if not http_logger.handlers:
     http_logger.addHandler(handler)
 http_logger.setLevel(logging.INFO)
 
+
+class StreamingSafeRequestLogger:
+    """Log a request without buffering StreamingResponse/SSE body chunks."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        started = time.perf_counter()
+        status_code = 500
+        logged = False
+
+        async def send_logged(message: Message) -> None:
+            nonlocal status_code, logged
+            if message["type"] == "http.response.start":
+                status_code = message["status"]
+            elif message["type"] == "http.response.body" and not message.get("more_body", False) and not logged:
+                logged = True
+                duration_ms = int((time.perf_counter() - started) * 1000)
+                http_logger.info("%s %s %s %dms", scope["method"], scope["path"], status_code, duration_ms)
+            await send(message)
+
+        await self.app(scope, receive, send_logged)
+
 # Voice/WebSocket logging
 voice_logger = logging.getLogger("ultrachat.voice")
 if not voice_logger.handlers:
@@ -83,20 +119,6 @@ if not voice_logger.handlers:
 voice_logger.setLevel(logging.INFO)
 
 
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    start_time = time.time()
-    response = await call_next(request)
-    duration_ms = int((time.time() - start_time) * 1000)
-    http_logger.info(
-        "%s %s %s %dms",
-        request.method,
-        request.url.path,
-        response.status_code,
-        duration_ms
-    )
-    return response
-
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -105,6 +127,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(StreamingSafeRequestLogger)
 
 # API routes
 app.include_router(chat_router, prefix=API_PREFIX)
@@ -114,6 +137,7 @@ app.include_router(memory_router, prefix=API_PREFIX)
 app.include_router(settings_router, prefix=API_PREFIX)
 app.include_router(web_search_router, prefix=API_PREFIX)
 app.include_router(voice_router, prefix=API_PREFIX)
+app.include_router(providers_router, prefix=API_PREFIX)
 
 
 # Serve frontend static files

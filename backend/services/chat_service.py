@@ -274,7 +274,8 @@ class ChatService:
         web_search: bool = False,
         use_memory: bool = True,
         enable_thinking: Optional[bool] = None,
-        tools: Optional[List[str]] = None
+        tools: Optional[List[str]] = None,
+        allow_system_mutation: bool = False,
     ) -> AsyncGenerator[str, None]:
         """
         Send a message and stream the response.
@@ -606,7 +607,9 @@ class ChatService:
                         else:
                             tool_result = "Web search not available"
                     else:
-                        exec_result = await self.tool_service.execute_tool(tool_name, tool_args)
+                        exec_result = await self.tool_service.execute_tool(
+                            tool_name, tool_args, allow_system_mutation=allow_system_mutation
+                        )
                         tool_result = self.tool_service.format_tool_result_for_context(tool_name, exec_result)
 
                     # Record tool result

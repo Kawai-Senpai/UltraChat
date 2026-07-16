@@ -14,6 +14,19 @@ import {
   BookOpen, Link, Calculator, Settings2, Database, Search, Mic
 } from 'lucide-react'
 import VoiceMode from './VoiceMode'
+import ProviderLab, { DEFAULT_SCHEMA } from './ProviderLab'
+import { loadProviderConfig, saveProviderConfig } from '../lib/providerStorage'
+
+const DEFAULT_PROVIDER_CONFIG = {
+  mode: 'local',
+  baseUrl: 'http://localhost:8001',
+  apiKey: '',
+  model: '',
+  stream: true,
+  structured: false,
+  schemaText: JSON.stringify(DEFAULT_SCHEMA, null, 2),
+  rememberCredentials: true,
+}
 
 export default function ChatView({ onToggleSidebar }) {
   const { 
@@ -46,6 +59,7 @@ export default function ChatView({ onToggleSidebar }) {
   const [useWebSearch, setUseWebSearch] = useState(false)
   const [useWikipedia, setUseWikipedia] = useState(false)
   const [useWebFetch, setUseWebFetch] = useState(false)
+  const [useWeather, setUseWeather] = useState(false)
   const [useCalculator, setUseCalculator] = useState(false)
   const [useMemoryStore, setUseMemoryStore] = useState(false)
   const [useMemorySearch, setUseMemorySearch] = useState(false)
@@ -63,11 +77,23 @@ export default function ChatView({ onToggleSidebar }) {
     separate_blocks: true,
     collapse_by_default: true,
   })
+  const [providerConfig, setProviderConfig] = useState(() =>
+    loadProviderConfig(DEFAULT_PROVIDER_CONFIG),
+  )
+  const [debugEvents, setDebugEvents] = useState([])
+  const [useFileList, setUseFileList] = useState(false)
+  const [useFileRead, setUseFileRead] = useState(false)
+  const [useFileWrite, setUseFileWrite] = useState(false)
+  const [useCommandExecute, setUseCommandExecute] = useState(false)
+  const [useStructuredSubagent, setUseStructuredSubagent] = useState(false)
   const messagesEndRef = useRef(null)
   const inputRef = useRef(null)
   const abortControllerRef = useRef(null)
   const dropdownRef = useRef(null)
   const assistantDropdownRef = useRef(null)
+  const isRemoteProvider = providerConfig.mode !== 'local'
+  const activeModel = isRemoteProvider ? providerConfig.model.trim() : loadedModel
+  const canChat = Boolean(activeModel)
 
   const LOAD_QUANT_OPTIONS = [
     { value: 'original', label: 'Original' },
@@ -116,6 +142,10 @@ export default function ChatView({ onToggleSidebar }) {
 
     loadReasoningConfig()
   }, [])
+
+  useEffect(() => {
+    saveProviderConfig(providerConfig)
+  }, [providerConfig])
 
   // Close dropdown when clicking outside (use click instead of mousedown)
   useEffect(() => {
@@ -223,6 +253,12 @@ export default function ChatView({ onToggleSidebar }) {
             if (prev?.id === data.conversation_id) return prev
             return { ...(prev || {}), id: data.conversation_id }
           })
+        }
+        if (data?.status === 'debug') {
+          setDebugEvents(prev => [...prev, data])
+        }
+        if (data?.status === 'thinking') {
+          setDebugEvents(prev => [...prev, { phase: 'thinking', ...data }])
         }
         // Tool thinking stream - accumulate thinking for next tool call
         if (data?.status === 'tool_thinking_delta' && data?.delta) {
@@ -337,8 +373,8 @@ export default function ChatView({ onToggleSidebar }) {
 
   const handleSend = async () => {
     if (!input.trim() || isGenerating) return
-    if (!loadedModel) {
-      toast.error('No model loaded. Go to Models and load one first.')
+    if (!canChat) {
+      toast.error(isRemoteProvider ? 'Enter a remote model name first.' : 'No model loaded. Go to Models and load one first.')
       return
     }
         setToolEvents([])
@@ -368,20 +404,44 @@ export default function ChatView({ onToggleSidebar }) {
       if (useWebSearch) enabledTools.push('web_search')
       if (useWikipedia) enabledTools.push('wikipedia')
       if (useWebFetch) enabledTools.push('web_fetch')
+      if (useWeather) enabledTools.push('weather')
       if (useCalculator) enabledTools.push('calculator')
       if (useMemoryStore) enabledTools.push('memory_store')
       if (useMemorySearch) enabledTools.push('memory_search')
+      if (useFileList) enabledTools.push('file_list')
+      if (useFileRead) enabledTools.push('file_read')
+      if (useFileWrite) enabledTools.push('file_write')
+      if (useCommandExecute) enabledTools.push('command_execute')
+      if (useStructuredSubagent) enabledTools.push('structured_subagent')
+
+      const needsSystemConfirmation = useFileWrite || useCommandExecute
+      if (needsSystemConfirmation && !window.confirm('Allow this model to write files and/or execute commands anywhere on this system for this chat turn? Review tool calls in the timeline.')) {
+        setIsGenerating(false)
+        setMessages(prev => prev.filter(m => m.id !== tempUserMsg.id))
+        return
+      }
+      let structuredSchema = null
+      if (providerConfig.structured) {
+        try { structuredSchema = JSON.parse(providerConfig.schemaText) }
+        catch { throw new Error('Structured output schema must be valid JSON') }
+      }
       
       const requestData = {
         message: userMessage,
         conversation_id: currentConversation?.id || null,
         parent_id: lastMessage?.id || null,
-        model: loadedModel,
+        model: activeModel,
         profile_id: currentProfile?.id || null,
         web_search: useWebSearch,
         use_memory: useMemory,
         enable_thinking: enableThinking,
         tools: enabledTools.length > 0 ? enabledTools : null,
+        stream: isRemoteProvider ? providerConfig.stream !== false : true,
+        provider_mode: providerConfig.mode,
+        provider_base_url: isRemoteProvider ? providerConfig.baseUrl : null,
+        provider_api_key: isRemoteProvider ? providerConfig.apiKey : null,
+        structured_schema: structuredSchema,
+        allow_system_mutation: needsSystemConfirmation,
       }
 
       const streamIterator = chatAPI.sendMessage(requestData, {
@@ -561,7 +621,9 @@ export default function ChatView({ onToggleSidebar }) {
             {currentConversation?.title || 'New Chat'}
           </h1>
           <div className="flex items-center gap-2 mt-0.5 overflow-visible">
+            <ProviderLab value={providerConfig} onChange={setProviderConfig} debugEvents={debugEvents} onClearDebug={() => setDebugEvents([])} />
             {/* Model Selector Dropdown */}
+            {!isRemoteProvider && <>
             <div className="relative" ref={dropdownRef}>
               <button
                 onClick={() => setShowModelDropdown(!showModelDropdown)}
@@ -683,9 +745,10 @@ export default function ChatView({ onToggleSidebar }) {
                 </div>
               )}
             </div>
+            </>}
             
             {/* Assistant Model Dropdown (for Speculative Decoding) - only show when main model is loaded */}
-            {loadedModel && (
+            {!isRemoteProvider && loadedModel && (
               <div className="relative" ref={assistantDropdownRef}>
                 <button
                   onClick={() => setShowAssistantDropdown(!showAssistantDropdown)}
@@ -855,7 +918,7 @@ export default function ChatView({ onToggleSidebar }) {
             <p className="text-sm text-neutral-400 mb-2 text-center max-w-md">
               Your local AI assistant powered by state-of-the-art language models.
             </p>
-            {!loadedModel && (
+            {!isRemoteProvider && !loadedModel && (
               <p className="text-xs text-yellow-400/80 mb-8 text-center">
                 ⚠️ Load a model from the Models page to start chatting
               </p>
@@ -968,8 +1031,8 @@ export default function ChatView({ onToggleSidebar }) {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder={loadedModel ? "Type your message..." : "Load a model to start chatting..."}
-                disabled={!loadedModel || isGenerating}
+                placeholder={canChat ? "Type your message..." : (isRemoteProvider ? "Enter a model in Provider stress lab..." : "Load a model to start chatting...")}
+                disabled={!canChat || isGenerating}
                 rows={1}
                 className="w-full px-4 py-3 pr-12 bg-white/5 border border-white/10 rounded-xl
                            text-sm text-white placeholder-neutral-500 resize-none
@@ -997,7 +1060,7 @@ export default function ChatView({ onToggleSidebar }) {
               <>
                 <button
                   onClick={() => setVoiceModeActive(true)}
-                  disabled={!loadedModel}
+                  disabled={!canChat || isRemoteProvider}
                   className="flex items-center justify-center w-12 h-12 
                              bg-white/5 hover:bg-white/10 disabled:bg-neutral-800 disabled:text-neutral-600
                              text-neutral-400 hover:text-white rounded-xl transition-all
@@ -1009,7 +1072,7 @@ export default function ChatView({ onToggleSidebar }) {
                 </button>
                 <button
                   onClick={handleSend}
-                  disabled={!input.trim() || !loadedModel}
+                  disabled={!input.trim() || !canChat}
                   className="flex items-center justify-center w-12 h-12 
                              bg-red-500 hover:bg-red-600 disabled:bg-neutral-800 disabled:text-neutral-600
                              text-white rounded-xl transition-all
@@ -1044,16 +1107,16 @@ export default function ChatView({ onToggleSidebar }) {
                 <button
                   onClick={() => setShowToolsPanel(prev => !prev)}
                   className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-medium transition-all ${
-                    (useWebSearch || useWikipedia || useWebFetch || useCalculator || useMemoryStore || useMemorySearch)
+                    (useWebSearch || useWikipedia || useWebFetch || useWeather || useCalculator || useMemoryStore || useMemorySearch || useFileList || useFileRead || useFileWrite || useCommandExecute || useStructuredSubagent)
                       ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30'
                       : 'bg-white/5 text-neutral-400 border border-white/10 hover:bg-white/10'
                   }`}
                 >
                   <Settings2 className="w-3 h-3" />
                   <span>Tools</span>
-                  {(useWebSearch || useWikipedia || useWebFetch || useCalculator || useMemoryStore || useMemorySearch) && (
+                  {(useWebSearch || useWikipedia || useWebFetch || useWeather || useCalculator || useMemoryStore || useMemorySearch || useFileList || useFileRead || useFileWrite || useCommandExecute || useStructuredSubagent) && (
                     <span className="w-4 h-4 flex items-center justify-center bg-purple-500/30 rounded-full text-[8px]">
-                      {[useWebSearch, useWikipedia, useWebFetch, useCalculator, useMemoryStore, useMemorySearch].filter(Boolean).length}
+                      {[useWebSearch, useWikipedia, useWebFetch, useWeather, useCalculator, useMemoryStore, useMemorySearch, useFileList, useFileRead, useFileWrite, useCommandExecute, useStructuredSubagent].filter(Boolean).length}
                     </span>
                   )}
                   <ChevronDown className={`w-3 h-3 transition-transform ${showToolsPanel ? 'rotate-180' : ''}`} />
@@ -1070,6 +1133,13 @@ export default function ChatView({ onToggleSidebar }) {
                         onClick={() => setUseWebSearch(prev => !prev)}
                         description="DuckDuckGo search"
                       />
+                      <div className="border-t border-white/5 my-1.5" />
+                      <div className="text-[10px] text-amber-400 uppercase tracking-wide mb-1 px-1">System tools</div>
+                      <ToolToggleItem label="List files" icon={Database} active={useFileList} onClick={() => setUseFileList(prev => !prev)} description="Any system directory" />
+                      <ToolToggleItem label="Read files" icon={BookOpen} active={useFileRead} onClick={() => setUseFileRead(prev => !prev)} description="Any system text file" />
+                      <ToolToggleItem label="Write files" icon={Pencil} active={useFileWrite} onClick={() => setUseFileWrite(prev => !prev)} description="Confirms for every turn" />
+                      <ToolToggleItem label="Run commands" icon={Code} active={useCommandExecute} onClick={() => setUseCommandExecute(prev => !prev)} description="Confirms for every turn" />
+                      <ToolToggleItem label="Structured subagent" icon={Sparkles} active={useStructuredSubagent} onClick={() => setUseStructuredSubagent(prev => !prev)} description="Nested strict JSON call" />
                       <ToolToggleItem
                         label="Wikipedia"
                         icon={BookOpen}
@@ -1084,6 +1154,7 @@ export default function ChatView({ onToggleSidebar }) {
                         onClick={() => setUseWebFetch(prev => !prev)}
                         description="Fetch webpage content"
                       />
+                      <ToolToggleItem label="Weather" icon={Globe} active={useWeather} onClick={() => setUseWeather(prev => !prev)} description="Current weather" />
                       <ToolToggleItem
                         label="Calculator"
                         icon={Calculator}
@@ -1133,6 +1204,7 @@ export default function ChatView({ onToggleSidebar }) {
           useWebSearch && 'web_search',
           useWikipedia && 'wikipedia',
           useWebFetch && 'web_fetch',
+          useWeather && 'weather',
           useCalculator && 'calculator',
           useMemoryStore && 'memory_store',
           useMemorySearch && 'memory_search',

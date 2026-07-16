@@ -52,6 +52,10 @@ trafilatura>=1.6.0  # Extract readable content from web pages
 python-multipart>=0.0.6
 pydantic>=2.5.0
 pydantic-settings>=2.1.0
+# Remote stress-test protocols. The LangChain ML Junction SDK remains optional:
+# UltraChat discovers it dynamically when installed from its local checkout.
+openai>=1.86.0
+anthropic>=0.54.0
 scipy>=1.11.0
 
 # ============================================
