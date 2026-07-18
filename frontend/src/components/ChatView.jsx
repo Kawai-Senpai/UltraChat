@@ -260,6 +260,12 @@ export default function ChatView({ onToggleSidebar }) {
         if (data?.status === 'thinking') {
           setDebugEvents(prev => [...prev, { phase: 'thinking', ...data }])
         }
+        if (data?.status === 'tool_limit_exhausted') {
+          toast.warning(data.message || 'External tool limit reached. Generating a final response without tools.')
+        }
+        if (data?.status === 'tool_limit_error') {
+          toast.error(data.message || 'The provider could not produce a final response after the tool limit was reached.')
+        }
         // Tool thinking stream - accumulate thinking for next tool call
         if (data?.status === 'tool_thinking_delta' && data?.delta) {
           console.log('[SSE] Tool thinking delta received:', data.delta.slice(0, 50))

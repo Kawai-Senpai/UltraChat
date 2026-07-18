@@ -25,6 +25,15 @@ from .web_search_service import get_web_search_service
 
 
 REMOTE_MODES = {"mljunction", "openai", "anthropic", "langchain_mljunction"}
+REMOTE_TOOL_ROUND_LIMIT = 20
+
+
+def _tool_limit_error_text(limit: int) -> str:
+    return (
+        f"⚠️ Tool execution stopped after reaching the {limit}-round external-provider limit. "
+        "The latest tool result was preserved, but the tools-disabled finalization request "
+        "returned no usable response. Review the tool timeline and send a new message to continue."
+    )
 
 
 @dataclass
@@ -122,7 +131,7 @@ class RemoteChatService:
             })
 
             final = Turn()
-            for round_number in range(1, 6):
+            for round_number in range(1, REMOTE_TOOL_ROUND_LIMIT + 1):
                 events: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
 
                 async def emit(event: str, data: dict[str, Any]) -> None:
@@ -193,7 +202,92 @@ class RemoteChatService:
                     trace.append({"phase": "tools", "calls": [dict(call)]})
                 history.extend(self._tool_history(mode, turn, round_number))
             else:
-                yield create_status_event("debug", {"phase": "tool_loop", "warning": "maximum five tool rounds reached"})
+                limit_event = {
+                    "phase": "tool_loop",
+                    "warning": "external tool-round limit reached; forcing a tools-disabled final response",
+                    "tool_round_limit": REMOTE_TOOL_ROUND_LIMIT,
+                }
+                trace.append(limit_event)
+                yield create_status_event("debug", limit_event)
+                yield create_status_event("tool_limit_exhausted", {
+                    "message": (
+                        f"The external tool limit of {REMOTE_TOOL_ROUND_LIMIT} rounds was reached. "
+                        "UltraChat is requesting one final response with tools disabled."
+                    ),
+                    "tool_round_limit": REMOTE_TOOL_ROUND_LIMIT,
+                    "recovery": "forced_final_response",
+                })
+
+                # The last model turn contained only tool calls. The result was
+                # appended to history above, so make one final provider request
+                # without tools to give the model a guaranteed opportunity to
+                # explain the result instead of persisting an empty assistant
+                # bubble. This applies uniformly to every external SDK mode.
+                events = asyncio.Queue()
+
+                async def emit_final(event: str, data: dict[str, Any]) -> None:
+                    await events.put((event, data))
+
+                try:
+                    task = asyncio.create_task(self._invoke(
+                        mode=mode,
+                        base_url=base_url,
+                        api_key=api_key,
+                        model=model,
+                        messages=history,
+                        tools=[],
+                        thinking=thinking,
+                        schema=structured_schema,
+                        options=options,
+                        stream=stream,
+                        emit=emit_final,
+                        session_id=mlj_session_id,
+                    ))
+                    while not task.done() or not events.empty():
+                        try:
+                            event, data = await asyncio.wait_for(events.get(), timeout=0.05)
+                        except asyncio.TimeoutError:
+                            continue
+                        trace.append({"phase": event, **data})
+                        if event == "token":
+                            yield create_token_event(data.get("token", ""))
+                        else:
+                            yield create_status_event(event, data)
+                    finalized = await task
+                    if not finalized.text.strip():
+                        finalized.text = _tool_limit_error_text(REMOTE_TOOL_ROUND_LIMIT)
+                        yield create_status_event("tool_limit_error", {
+                            "message": finalized.text,
+                            "tool_round_limit": REMOTE_TOOL_ROUND_LIMIT,
+                            "reason": "empty_forced_final_response",
+                        })
+                    final = finalized
+                    finalization_event = {
+                        "phase": "forced_final_response",
+                        "text_chars": len(final.text),
+                        "unexpected_tool_calls": len(final.tool_calls),
+                        "usage": final.usage,
+                    }
+                    trace.append(finalization_event)
+                    yield create_status_event("debug", finalization_event)
+                except Exception as exc:
+                    final = Turn(
+                        text=_tool_limit_error_text(REMOTE_TOOL_ROUND_LIMIT),
+                        usage=final.usage,
+                        raw={"finalization_error": f"{type(exc).__name__}: {exc}"},
+                    )
+                    yield create_status_event("tool_limit_error", {
+                        "message": final.text,
+                        "tool_round_limit": REMOTE_TOOL_ROUND_LIMIT,
+                        "reason": "forced_final_response_failed",
+                    })
+                    failure_event = {
+                        "phase": "forced_final_response",
+                        "warning": "provider finalization failed; persisted a non-empty fallback",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                    trace.append(failure_event)
+                    yield create_status_event("debug", failure_event)
 
             duration_ms = int((time.perf_counter() - started) * 1000)
             assistant = await MessageModel.create(
